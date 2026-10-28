@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""
+Fake Azure CLI (az) driven by environment variables and fixture configuration.
+Used in tests to simulate all Azure CLI behaviors, error states, and run-command outputs.
+"""
+
+import json
+import os
+import sys
+import time
+
+log_file = os.environ.get("FAKE_AZ_LOG")
+if log_file:
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(" ".join(sys.argv[1:]) + "\n")
+
+# Verify that --subscription is always passed (spec rule)
+args = sys.argv[1:]
+if "run-command" in args or "get-instance-view" in args or "start" in args:
+    if "--subscription" not in args:
+        sys.stderr.write("FATAL: az command executed without --subscription flag\n")
+        sys.exit(1)
+
+# Extract VM name if present
+vm_name = None
+if "-n" in args:
+    idx = args.index("-n")
+    if idx + 1 < len(args):
+        vm_name = args[idx + 1]
+
+# Handle `az account show`
+if "account" in args and "show" in args:
+    if os.environ.get("FAKE_AZ_ACCOUNT_FAIL"):
+        sys.stderr.write("Account show failed\n")
+        sys.exit(1)
+    print(json.dumps({"id": "sub-prod-01", "name": "Prod Subscription"}))
+    sys.exit(0)
+
+# Handle `az vm start`
+if "vm" in args and "start" in args:
+    if os.environ.get("FAKE_AZ_START_FAIL"):
+        sys.stderr.write("Failed to start VM\n")
+        sys.exit(1)
+    sys.exit(0)
+
+# Handle `az vm get-instance-view`
+if "vm" in args and "get-instance-view" in args:
+    state = os.environ.get(f"FAKE_AZ_STATE_{vm_name}", os.environ.get("FAKE_AZ_DEFAULT_STATE", "PowerState/running"))
+    # If -o tsv requested, output plain tsv
+    if "-o" in args and "tsv" in args:
+        print(state)
+    else:
+        print(json.dumps({"instanceView": {"statuses": [{"code": state}]}}))
+    sys.exit(0)
+
+# Handle `az vm run-command invoke`
+if "run-command" in args and "invoke" in args:
+    # Check fixtures configuration
+    mode = os.environ.get(f"FAKE_AZ_RC_{vm_name}", os.environ.get("FAKE_AZ_RC_DEFAULT", "success"))
+
+    # Throttled retry simulation (e.g. throttle first N times, then succeed)
+    throttle_count_key = f"FAKE_AZ_THROTTLE_COUNT_{vm_name}"
+    if throttle_count_key in os.environ:
+        count = int(os.environ[throttle_count_key])
+        if count > 0:
+            os.environ[throttle_count_key] = str(count - 1)
+            sys.stderr.write("TooManyRequests: 429 Client Error: Throttled\n")
+            sys.exit(1)
+        else:
+            mode = "success"
+
+    # Busy retry simulation
+    busy_count_key = f"FAKE_AZ_BUSY_COUNT_{vm_name}"
+    if busy_count_key in os.environ:
+        count = int(os.environ[busy_count_key])
+        if count > 0:
+            os.environ[busy_count_key] = str(count - 1)
+            sys.stderr.write("Conflict: Operation in progress on VM\n")
+            sys.exit(1)
+        else:
+            mode = "success"
+
+    # Unknown retry simulation
+    unknown_count_key = f"FAKE_AZ_UNKNOWN_COUNT_{vm_name}"
+    if unknown_count_key in os.environ:
+        count = int(os.environ[unknown_count_key])
+        if count > 0:
+            os.environ[unknown_count_key] = str(count - 1)
+            sys.stderr.write("TemporaryFailure: network blip\n")
+            sys.exit(1)
+        else:
+            mode = "success"
+
+    if mode == "success":
+        # Success output
+        payload = {
+            "value": [
+                {
+                    "code": "ComponentStatus/StdOut/succeeded",
+                    "displayStatus": "Provisioning succeeded",
+                    "message": (
+                        "[stdout]\n"
+                        "===BEGIN_RESULT_RES===\n"
+                        "HIP_VERSION=MjIxMDIwMjY=\n"
+                        "KERNEL_COUNT=Mw==\n"
+                        "===END_RESULT_RES===\n"
+                        "[stderr]\n"
+                    )
+                }
+            ]
+        }
+        print(json.dumps(payload))
+        sys.exit(0)
+
+    elif mode == "throttled":
+        sys.stderr.write("TooManyRequests: 429 Client Error: Throttled\n")
+        sys.exit(1)
+
+    elif mode == "busy":
+        sys.stderr.write("Conflict: Operation in progress on VM\n")
+        sys.exit(1)
+
+    elif mode == "agent":
+        sys.stderr.write("VMAgentStatusCommunicationError: VM Agent is not ready or responsive\n")
+        sys.exit(1)
+
+    elif mode == "missing":
+        sys.stderr.write("ResourceNotFound: The Resource 'Microsoft.Compute/virtualMachines/...' was not found\n")
+        sys.exit(1)
+
+    elif mode == "auth":
+        sys.stderr.write("AuthorizationFailed: AADSTS700016: Application was not found in directory. Run az login.\n")
+        sys.exit(1)
+
+    elif mode == "unknown":
+        sys.stderr.write("InternalServerError: Azure encountered an unexpected issue\n")
+        sys.exit(1)
+
+    elif mode == "truncated":
+        # Truncated output: 4 KB buffer dropped the begin marker
+        payload = {
+            "value": [
+                {
+                    "message": (
+                        "[stdout]\n"
+                        "...lots of output...\n"
+                        "HIP_VERSION=MjIxMDIwMjY=\n"
+                        "===END_RESULT_RES===\n"
+                        "[stderr]\n"
+                    )
+                }
+            ]
+        }
+        print(json.dumps(payload))
+        sys.exit(0)
+
+    elif mode == "no_marker":
+        payload = {
+            "value": [
+                {
+                    "message": "[stdout]\nPlain execution with no markers\n[stderr]\n"
+                }
+            ]
+        }
+        print(json.dumps(payload))
+        sys.exit(0)
+
+    elif mode == "timeout":
+        time.sleep(10)
+        sys.exit(0)
+
+    else:
+        sys.stderr.write(f"Unknown mode: {mode}\n")
+        sys.exit(1)
+
+sys.exit(0)
+

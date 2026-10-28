@@ -1,0 +1,135 @@
+"""Precheck evaluation engine: host-side pre-flight checks, caching, actions."""
+
+from __future__ import annotations
+
+import shlex
+import threading
+from typing import Any
+
+from y2b.config import Job, Precheck
+from y2b.inputcsv import VMRow
+from y2b.shell import run_bash
+from y2b.vmlog import VMLogger
+
+
+class PrecheckEngine:
+    """Evaluates sequential host-side prechecks with subscription caching and VM start support."""
+
+    def __init__(self) -> None:
+        self._cache: dict[tuple[str, str], tuple[str, int, str]] = {}
+        self._cache_locks: dict[tuple[str, str], threading.Lock] = {}
+        self._global_lock = threading.Lock()
+
+    def _get_lock_for_key(self, key: tuple[str, str]) -> threading.Lock:
+        with self._global_lock:
+            if key not in self._cache_locks:
+                self._cache_locks[key] = threading.Lock()
+            return self._cache_locks[key]
+
+    def _execute_script(self, precheck: Precheck, row: VMRow, yaml_dir) -> tuple[str, int, str]:
+        script_code = precheck.script or ""
+        if precheck.script_path:
+            with open(precheck.script_path, "r", encoding="utf-8") as sf:
+                script_code = sf.read()
+
+        res = run_bash(script_code, env=row.env, timeout=precheck.timeout, cwd=yaml_dir)
+        return res.stdout_stripped, res.rc, res.stderr
+
+    def run_prechecks_for_vm(
+        self,
+        job: Job,
+        row: VMRow,
+        logger: VMLogger,
+    ) -> tuple[bool, str | None]:
+        """
+        Run all prechecks for a single VM in YAML order.
+        Returns:
+            (proceed, outcome_marker)
+            If proceed is True, outcome_marker is None.
+            If proceed is False, outcome_marker is SKIPPED:..., ENDED:..., or ERROR:...
+        """
+        for precheck in job.invoke.precheck:
+            # Check subscription cache (A6)
+            if precheck.cache == "subscription":
+                cache_key = (precheck.name, row.subscription)
+                lock = self._get_lock_for_key(cache_key)
+                with lock:
+                    if cache_key in self._cache:
+                        stdout, rc, stderr = self._cache[cache_key]
+                        logger.log(
+                            f"Precheck '{precheck.name}' result retrieved from subscription cache for '{row.subscription}'"
+                        )
+                    else:
+                        stdout, rc, stderr = self._execute_script(precheck, row, job.yaml_dir)
+                        self._cache[cache_key] = (stdout, rc, stderr)
+            else:
+                stdout, rc, stderr = self._execute_script(precheck, row, job.yaml_dir)
+
+            # Match against result keys (keys normalized to strings in config) (A4)
+            res_spec = None
+            if stdout in precheck.result:
+                res_spec = precheck.result[stdout]
+            elif "default" in precheck.result:
+                res_spec = precheck.result["default"]
+            else:
+                logger.log_precheck(
+                    precheck.name,
+                    stdout,
+                    "unmatched",
+                    f"Output '{stdout}' matched no result key and no default was defined",
+                )
+                return False, f"ERROR:precheck_unmatched:{precheck.name}"
+
+            action = res_spec.get("action", "")
+            log_msg = res_spec.get("log", "")
+            logger.log_precheck(precheck.name, stdout, action, log_msg)
+
+            # Action semantics (A5)
+            if action == "continue":
+                continue
+            elif action == "end_check":
+                return False, f"ENDED:{precheck.name}"
+            elif action == "skip":
+                if job.actions == "start":
+                    # Root action start policy (D6)
+                    logger.log(
+                        f"actions: start policy triggered for {row.vm_name} (RG: {row.resource_group}). Running az vm start..."
+                    )
+                    start_cmd = (
+                        f"az vm start --subscription {shlex.quote(row.subscription)} "
+                        f"-g {shlex.quote(row.resource_group)} -n {shlex.quote(row.vm_name)}"
+                    )
+                    start_res = run_bash(start_cmd, env=row.env, timeout=precheck.timeout, cwd=job.yaml_dir)
+                    if start_res.rc != 0:
+                        logger.log_error(f"az vm start failed with rc={start_res.rc}: {start_res.stderr}")
+                        return False, f"ERROR:start_failed:{precheck.name}"
+
+                    logger.log(
+                        f"az vm start succeeded. Re-running precheck '{precheck.name}' once to confirm state..."
+                    )
+                    # Re-run the precheck once
+                    re_stdout, re_rc, re_stderr = self._execute_script(precheck, row, job.yaml_dir)
+                    re_spec = None
+                    if re_stdout in precheck.result:
+                        re_spec = precheck.result[re_stdout]
+                    elif "default" in precheck.result:
+                        re_spec = precheck.result["default"]
+                    else:
+                        return False, f"ERROR:start_failed:{precheck.name}"
+
+                    re_action = re_spec.get("action", "")
+                    re_log = re_spec.get("log", "")
+                    logger.log_precheck(precheck.name, re_stdout, re_action, f"(after start) {re_log}")
+
+                    if re_action == "continue":
+                        continue
+                    else:
+                        return False, f"ERROR:start_failed:{precheck.name}"
+                else:
+                    return False, f"SKIPPED:{precheck.name}"
+            else:
+                logger.log_error(f"Unknown action '{action}' for precheck '{precheck.name}'")
+                return False, f"ERROR:precheck_unknown_action:{action}"
+
+        return True, None
+
