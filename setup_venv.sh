@@ -66,9 +66,9 @@ if is_sourced; then
   fi
   echo "=================================================="
   echo "✓ Virtual environment activated: (.venv)"
-  echo "✓ 'y2b' command is now available in your PATH."
+  echo "✓ 'y2b' and 'y2p' commands are now available in your PATH."
   echo "=================================================="
-  echo "Quick check: try running 'y2b --help'"
+  echo "Quick check: try running 'y2b --help' or 'y2p --help'"
 else
   # Executed directly in subshell
   echo "=================================================="

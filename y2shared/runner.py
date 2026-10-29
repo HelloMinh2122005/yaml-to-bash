@@ -28,6 +28,12 @@ from y2shared.dispatcher import (
     read_results,
     ReadResult,
 )
+from y2shared.hostenv import (
+    check_host_bash,
+    raise_nofile,
+    start_caffeinate,
+    stop_caffeinate,
+)
 from y2shared.inputcsv import VMRow, read_input_csv
 from y2shared.merger import merge_parts, MergeError
 from y2shared.parts import (
@@ -231,6 +237,7 @@ def run_collect_phase(
 
 def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
     """Main execution function invoked by `<tool> run`."""
+    check_host_bash()
     if profile is None:
         from y2b.profile import PROFILE
         profile = PROFILE
@@ -274,6 +281,8 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
         return 0
 
     parallel = args.parallel if args.parallel is not None else job.parallel
+    raise_nofile(required_fds=parallel * 4 + 32)
+    caffeinate_proc = start_caffeinate()
 
     # 4. Initialize Parts Directory & Get run_id
     parts_dir = get_parts_dir(job.output_csv)
@@ -579,6 +588,7 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
             return 3
 
     finally:
+        stop_caffeinate(caffeinate_proc)
         signal.signal(signal.SIGINT, original_sigint)
 
     # ==============================================================================

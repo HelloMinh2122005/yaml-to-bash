@@ -7,6 +7,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from y2shared.hostenv import resolve_bash
+
 
 @dataclass
 class ShellResult:
@@ -32,9 +34,10 @@ def run_bash(
         for k, v in env.items():
             merged_env[str(k)] = str(v)
 
+    bash_path, _ = resolve_bash()
     try:
         proc = subprocess.run(
-            ["bash", "-c", script],
+            [bash_path, "-c", script],
             env=merged_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

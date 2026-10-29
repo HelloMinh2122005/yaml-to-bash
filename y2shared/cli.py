@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from y2shared.hostenv import check_host_bash
 from y2shared.inputcsv import read_input_csv
 from y2shared.profile import Profile
 from y2shared.runner import run_job
@@ -14,6 +15,7 @@ from y2shared.validate import validate_job_file
 
 def cmd_validate(args: argparse.Namespace, profile: Profile) -> int:
     """Validate job YAML configuration and input CSV."""
+    check_host_bash()
     yaml_path = Path(args.job_yaml).resolve()
     print(f"Validating job specification: {yaml_path}")
 

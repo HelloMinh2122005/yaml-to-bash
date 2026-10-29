@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 from y2shared.config import Job, Step
+from y2shared.hostenv import resolve_bash
 from y2shared.scan import scan_written_vars as _scan_written_vars
 
 TEMPLATE_PATH = Path(__file__).parent / "templates" / "remote.sh.tpl"
@@ -121,15 +122,23 @@ def compile_job(job: Job, run_id: str = "preview") -> tuple[str, list[str]]:
         )
 
     # Check bash -n syntax
+    bash_path, (major, minor) = resolve_bash()
     try:
         proc = subprocess.run(
-            ["bash", "-n"],
+            [bash_path, "-n"],
             input=compiled,
             text=True,
             capture_output=True,
         )
         if proc.returncode != 0:
-            errors.append(f"Syntax error in compiled bash script:\n{proc.stderr.strip()}")
+            if major > 0 and major < 4:
+                import sys
+                print(
+                    f"WARNING: Syntax warning in compiled bash script (checked with bash {major}.{minor}):\n{proc.stderr.strip()}",
+                    file=sys.stderr,
+                )
+            else:
+                errors.append(f"Syntax error in compiled bash script:\n{proc.stderr.strip()}")
     except FileNotFoundError:
         # bash not installed on host, skip bash -n
         pass
@@ -155,15 +164,23 @@ def compile_collect_script(job: Job) -> tuple[str, list[str]]:
 
     compiled = template.replace("__RES_FILE__", shlex.quote(res_file))
 
+    bash_path, (major, minor) = resolve_bash()
     try:
         proc = subprocess.run(
-            ["bash", "-n"],
+            [bash_path, "-n"],
             input=compiled,
             text=True,
             capture_output=True,
         )
         if proc.returncode != 0:
-            errors.append(f"Syntax error in compiled collect script:\n{proc.stderr.strip()}")
+            if major > 0 and major < 4:
+                import sys
+                print(
+                    f"WARNING: Syntax warning in compiled collect script (checked with bash {major}.{minor}):\n{proc.stderr.strip()}",
+                    file=sys.stderr,
+                )
+            else:
+                errors.append(f"Syntax error in compiled collect script:\n{proc.stderr.strip()}")
     except FileNotFoundError:
         pass
 
