@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import warnings
 from pathlib import Path
 from typing import Any, Mapping
 
-from y2b.inputcsv import VMRow
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # Windows fallback
+
+from y2shared.inputcsv import VMRow
 
 
 class CollectList:
@@ -31,7 +37,13 @@ class CollectList:
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(line)
                 f.flush()
-                os.fsync(f.fileno())
+                if sys.platform == "darwin" and fcntl is not None and hasattr(fcntl, "F_FULLFSYNC"):
+                    try:
+                        fcntl.fcntl(f.fileno(), fcntl.F_FULLFSYNC)
+                    except OSError:
+                        os.fsync(f.fileno())
+                else:
+                    os.fsync(f.fileno())
 
     def load(
         self,

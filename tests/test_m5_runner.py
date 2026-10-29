@@ -8,10 +8,10 @@ import sys
 from pathlib import Path
 import pytest
 
-from y2b.config import load_job
-from y2b.merger import merge_parts
-from y2b.parts import get_parts_dir, is_part_finished
-from y2b.runner import run_job
+from y2shared.config import load_job
+from y2shared.merger import merge_parts
+from y2shared.parts import get_parts_dir, is_part_finished
+from y2shared.runner import run_job
 
 FAKE_AZ_DIR = Path(__file__).parent / "fake_az"
 

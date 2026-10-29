@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from y2b.config import Job
-from y2b.validate import ValidationIssue, ValidationResult
+from y2shared.config import Job
+from y2shared.validate import ValidationIssue, ValidationResult
 
 REQUIRED_COLUMNS = ["vm_name", "resource_group", "subscription", "os"]
 ENV_NAME_RE = re.compile(r"[^A-Z0-9_]")
@@ -50,41 +50,28 @@ def to_env_var_name(col_name: str) -> str:
     return cleaned
 
 
-def is_linux_os(os_str: str) -> bool:
-    """Check if the OS string is Linux-like (D3)."""
+def os_family(os_str: str) -> str:
+    """Determine OS family ('linux' or 'windows')."""
     val = os_str.strip().lower()
     if not val:
-        return False
-    # If explicitly windows
+        return "linux"
     if val.startswith("win") or "windows" in val:
-        return False
-    # Common Linux distribution indicators
-    known_linux = (
-        "linux",
-        "rhel",
-        "centos",
-        "ubuntu",
-        "debian",
-        "fedora",
-        "suse",
-        "rocky",
-        "alma",
-        "amzn",
-        "amazon",
-        "arch",
-        "alpine",
-        "oracle",
-        "redhat",
-    )
-    if any(k in val for k in known_linux):
-        return True
-    # If not containing win/windows, default to True unless clearly non-linux
-    return True
+        return "windows"
+    return "linux"
+
+
+_detect_os_family = os_family
+
+
+def is_linux_os(os_str: str) -> bool:
+    """Check if the OS string is Linux-like (D3)."""
+    return os_family(os_str) == "linux"
 
 
 def read_input_csv(
     csv_path: str | Path,
     job: Job | None = None,
+    os_family: str = "linux",
 ) -> tuple[list[VMRow], list[str], ValidationResult]:
     """
     Read, parse and validate list_vm.csv.
@@ -174,14 +161,20 @@ def read_input_csv(
         if not sub:
             errors.append(ValidationIssue(path=f"row[{row_idx}].subscription", message="subscription cannot be empty"))
 
-        # Linux check (D3)
-        if os_val and not is_linux_os(os_val):
-            errors.append(
-                ValidationIssue(
-                    path=f"row[{row_idx}].os",
-                    message=f"VM '{vm_name}' has non-Linux OS '{os_val}' (Linux only supported in v1 per D3)",
+        # OS family check
+        if os_val:
+            row_fam = _detect_os_family(os_val)
+            if row_fam != os_family:
+                if os_family == "linux":
+                    msg = f"VM '{vm_name}' has non-Linux OS '{os_val}'; y2b only targets Linux VMs (use y2p)"
+                else:
+                    msg = f"VM '{vm_name}' has non-Windows OS '{os_val}'; y2p only targets Windows VMs (use y2b)"
+                errors.append(
+                    ValidationIssue(
+                        path=f"row[{row_idx}].os",
+                        message=msg,
+                    )
                 )
-            )
 
         # Duplicate check: (subscription, resource_group, vm_name)
         vm_key = (sub.lower(), rg.lower(), vm_name.lower())

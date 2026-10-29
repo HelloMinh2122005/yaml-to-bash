@@ -6,12 +6,11 @@ import re
 import time
 from typing import Any
 
-from y2b.compiler import scan_written_vars
-from y2b.config import Job
-from y2b.dispatcher import RemoteResult
-from y2b.inputcsv import VMRow, to_env_var_name
-from y2b.shell import run_bash
-from y2b.vmlog import VMLogger
+from y2shared.config import Job
+from y2shared.dispatcher import RemoteResult
+from y2shared.inputcsv import VMRow, to_env_var_name
+from y2shared.shell import run_bash
+from y2shared.vmlog import VMLogger
 
 
 def collect_for_vm(
@@ -20,6 +19,7 @@ def collect_for_vm(
     remote_result: RemoteResult | None = None,
     outcome_marker: str | None = None,
     logger: VMLogger | None = None,
+    var_to_step: dict[str, int] | None = None,
 ) -> list[str]:
     """
     Produce the list of column values for a single VM according to job.collect.
@@ -51,11 +51,14 @@ def collect_for_vm(
                 env[k] = v
 
     # Map static vars to step indices (1-based), with later step overwriting earlier
-    var_to_step: dict[str, int] = {}
-    if job.invoke.runcommand and job.invoke.runcommand.steps:
-        for i, step in enumerate(job.invoke.runcommand.steps, start=1):
-            for v in scan_written_vars(step):
-                var_to_step[v] = i
+    if var_to_step is None:
+        var_to_step = {}
+        if job.invoke.runcommand and job.invoke.runcommand.steps:
+            from y2shared.scan import scan_written_vars
+            from y2b.compiler import WRITE_RESULT_PATTERN
+            for i, step in enumerate(job.invoke.runcommand.steps, start=1):
+                for v in scan_written_vars(step, WRITE_RESULT_PATTERN):
+                    var_to_step[v] = i
 
     for col in job.collect:
         if col.source:

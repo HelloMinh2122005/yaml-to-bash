@@ -5,10 +5,10 @@ import pytest
 import yaml
 
 from y2b.compiler import scan_written_vars, compile_job
-from y2b.config import Job, Step, RunCommand, Invoke, Column, load_job
-from y2b.collector import collect_for_vm
-from y2b.dispatcher import ReadResult
-from y2b.inputcsv import VMRow
+from y2shared.config import Job, Step, RunCommand, Invoke, Column, load_job
+from y2shared.collector import collect_for_vm
+from y2shared.dispatcher import ReadResult
+from y2shared.inputcsv import VMRow
 from y2b.validate import validate_job_dict
 
 

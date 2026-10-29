@@ -2,8 +2,8 @@
 
 from pathlib import Path
 import pytest
-from y2b.config import load_job
-from y2b.inputcsv import read_input_csv, to_env_var_name, is_linux_os
+from y2shared.config import load_job
+from y2shared.inputcsv import read_input_csv, to_env_var_name, is_linux_os, os_family
 
 
 def test_env_var_name():

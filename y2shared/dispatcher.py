@@ -14,9 +14,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from y2b.config import Job
-from y2b.inputcsv import VMRow
-from y2b.vmlog import VMLogger
+from y2shared.config import Job
+from y2shared.inputcsv import VMRow
+from y2shared.vmlog import VMLogger
 
 INVOKE_CALL_TIMEOUT = 300
 READER_CALL_TIMEOUT = 300
@@ -116,21 +116,37 @@ def parse_run_command_output(
             logger.log_error(f"Failed to parse az JSON response: {e}\nRaw output: {raw_json_str[:500]}")
         return {}, "ERROR:az:invalid_json_response", raw_json_str
 
-    # Extract message from value[0].message
+    # Extract message from value[0].message, checking for StdOut entry first (Windows)
     message = ""
+    stdout_text = None
     if isinstance(data, dict):
         val = data.get("value")
-        if isinstance(val, list) and len(val) > 0 and isinstance(val[0], dict):
-            message = val[0].get("message", "")
+        if isinstance(val, list):
+            for entry in val:
+                if isinstance(entry, dict) and "StdOut" in entry.get("code", ""):
+                    stdout_text = entry.get("message", "")
+                    message = stdout_text
+                    break
+            if stdout_text is None:
+                if len(val) > 0 and isinstance(val[0], dict):
+                    message = val[0].get("message", "")
         elif "message" in data:
             message = str(data["message"])
-    elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
-        message = data[0].get("message", "")
+    elif isinstance(data, list):
+        for entry in data:
+            if isinstance(entry, dict) and "StdOut" in entry.get("code", ""):
+                stdout_text = entry.get("message", "")
+                message = stdout_text
+                break
+        if stdout_text is None and len(data) > 0 and isinstance(data[0], dict):
+            message = data[0].get("message", "")
 
-    # Extract stdout section: text between [stdout] and [stderr]
-    stdout_text = message
-    if "[stdout]" in message:
-        after_stdout = message.split("[stdout]", 1)[1]
+    # Extract stdout section: text between [stdout] and [stderr] if formatted that way
+    if stdout_text is None:
+        stdout_text = message
+
+    if "[stdout]" in stdout_text:
+        after_stdout = stdout_text.split("[stdout]", 1)[1]
         if "[stderr]" in after_stdout:
             stdout_text = after_stdout.split("[stderr]", 1)[0]
         else:
@@ -301,6 +317,7 @@ def invoke_nowait(
     delay_multiplier: float = 1.0,
     sleep_fn: Callable[[float], None] = time.sleep,
     timeout: int = INVOKE_CALL_TIMEOUT,
+    command_id: str = "RunShellScript",
 ) -> InvokeResult:
     """
     Fire the compiled script on the VM with --no-wait.
@@ -319,7 +336,7 @@ def invoke_nowait(
         "-n",
         row.vm_name,
         "--command-id",
-        "RunShellScript",
+        command_id,
         "--scripts",
         f"@{remote_script_path}",
         "--no-wait",
@@ -363,6 +380,7 @@ def read_results(
     delay_multiplier: float = 1.0,
     sleep_fn: Callable[[float], None] = time.sleep,
     timeout: int = READER_CALL_TIMEOUT,
+    command_id: str = "RunShellScript",
 ) -> ReadResult:
     """
     Read results from VM by executing collect.sh synchronously.
@@ -380,7 +398,7 @@ def read_results(
         "-n",
         row.vm_name,
         "--command-id",
-        "RunShellScript",
+        command_id,
         "--scripts",
         f"@{collect_script_path}",
         "-o",
@@ -465,58 +483,3 @@ def read_results(
         raw_message=raw_msg,
     )
 
-
-def dispatch_vm(
-    job: Job,
-    row: VMRow,
-    remote_script_path: Path,
-    logger: VMLogger,
-    circuit_breaker: AuthCircuitBreaker | None = None,
-    delay_multiplier: float = 1.0,
-    sleep_fn: Callable[[float], None] = time.sleep,
-) -> ReadResult:
-    """Synchronous dispatch function (legacy wrapper)."""
-    cmd = [
-        "az",
-        "vm",
-        "run-command",
-        "invoke",
-        "--subscription",
-        row.subscription,
-        "-g",
-        row.resource_group,
-        "-n",
-        row.vm_name,
-        "--command-id",
-        "RunShellScript",
-        "--scripts",
-        f"@{remote_script_path}",
-        "-o",
-        "json",
-    ]
-    status, rc, stdout, stderr, attempts, duration = _az_run_command(
-        cmd=cmd,
-        timeout=job.run_timeout,
-        busy_policy="retry",
-        logger=logger,
-        circuit_breaker=circuit_breaker,
-        delay_multiplier=delay_multiplier,
-        sleep_fn=sleep_fn,
-    )
-    if status == "SUCCESS":
-        parsed_vars, err_marker, raw_msg = parse_run_command_output(stdout, logger=logger)
-        return ReadResult(
-            status="OK" if not err_marker else "ERROR",
-            vars=parsed_vars,
-            error=err_marker,
-            attempts=attempts,
-            duration_s=duration,
-            raw_message=raw_msg,
-        )
-    return ReadResult(
-        status="ERROR",
-        error=status,
-        attempts=attempts,
-        duration_s=duration,
-        raw_message=stderr,
-    )

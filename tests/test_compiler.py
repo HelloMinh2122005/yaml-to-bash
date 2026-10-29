@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 import pytest
 
-from y2b.config import Job, Step, RunCommand, Invoke, load_job
+from y2shared.config import Job, Step, RunCommand, Invoke, load_job
 from y2b.compiler import compile_job, compile_collect_script
 
 
@@ -217,9 +217,9 @@ collect:
     assert parsed_vars.get("__Y2B_STEP_4__") == "timeout"
 
     # Test collector resolution on this result
-    from y2b.collector import collect_for_vm
-    from y2b.dispatcher import ReadResult
-    from y2b.inputcsv import VMRow
+    from y2shared.collector import collect_for_vm
+    from y2shared.dispatcher import ReadResult
+    from y2shared.inputcsv import VMRow
     dummy_row = VMRow(index=1, vm_name="test-vm", resource_group="rg", subscription="sub", os="linux", env={}, raw_data={"dummy": "val"})
     vals = collect_for_vm(job, dummy_row, remote_result=ReadResult(status="OK", vars=parsed_vars))
     assert vals[0] == "val"

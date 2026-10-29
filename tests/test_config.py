@@ -2,7 +2,7 @@
 
 from pathlib import Path
 import pytest
-from y2b.config import load_job, parse_job_from_dict, compute_content_hash, parse_duration
+from y2shared.config import load_job, parse_job_from_dict, compute_content_hash, parse_duration
 
 
 def test_load_example_job():

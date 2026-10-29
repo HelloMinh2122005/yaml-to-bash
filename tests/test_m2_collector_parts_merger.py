@@ -4,19 +4,19 @@ import csv
 from pathlib import Path
 import pytest
 
-from y2b.config import load_job
-from y2b.collector import collect_for_vm
-from y2b.dispatcher import RemoteResult
-from y2b.inputcsv import VMRow, read_input_csv
-from y2b.merger import merge_parts, MergeError
-from y2b.parts import (
+from y2shared.config import load_job
+from y2shared.collector import collect_for_vm
+from y2shared.dispatcher import RemoteResult
+from y2shared.inputcsv import VMRow, read_input_csv
+from y2shared.merger import merge_parts, MergeError
+from y2shared.parts import (
     get_parts_dir,
     init_parts_dir,
     write_part_files,
     is_part_finished,
     get_part_paths,
 )
-from y2b.vmlog import VMLogger
+from y2shared.vmlog import VMLogger
 
 
 def test_collector_and_merger_spec_5_4(tmp_path):

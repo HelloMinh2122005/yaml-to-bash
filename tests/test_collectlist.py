@@ -4,10 +4,10 @@ import json
 from pathlib import Path
 import pytest
 
-from y2b.collectlist import CollectList
-from y2b.config import Job, Invoke, RunCommand
-from y2b.inputcsv import VMRow
-from y2b.parts import (
+from y2shared.collectlist import CollectList
+from y2shared.config import Job, Invoke, RunCommand
+from y2shared.inputcsv import VMRow
+from y2shared.parts import (
     init_parts_dir,
     get_run_info,
     update_run_phase,
@@ -15,7 +15,7 @@ from y2b.parts import (
     is_part_still_running,
     write_part_files,
 )
-from y2b.vmlog import VMLogger
+from y2shared.vmlog import VMLogger
 
 
 def make_test_row(index: int = 1, name: str = "vm-01") -> VMRow:

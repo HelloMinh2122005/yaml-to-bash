@@ -7,7 +7,8 @@ import shlex
 import subprocess
 from pathlib import Path
 
-from y2b.config import Job, Step
+from y2shared.config import Job, Step
+from y2shared.scan import scan_written_vars as _scan_written_vars
 
 TEMPLATE_PATH = Path(__file__).parent / "templates" / "remote.sh.tpl"
 COLLECT_TEMPLATE_PATH = Path(__file__).parent / "templates" / "collect.sh.tpl"
@@ -23,30 +24,7 @@ def scan_written_vars(step: Step | dict | str) -> set[str]:
     Matches write_result NAME VALUE or write_result "NAME" ...
     Returns set of variable names (excluding reserved __Y2B_*).
     """
-    if isinstance(step, str):
-        body = step
-    elif isinstance(step, dict):
-        sp = step.get("script_path")
-        if sp:
-            try:
-                with open(sp, "r", encoding="utf-8") as f:
-                    body = f.read()
-            except Exception:
-                body = ""
-        else:
-            body = step.get("script") or ""
-    else:
-        if step.script_path:
-            try:
-                with open(step.script_path, "r", encoding="utf-8") as f:
-                    body = f.read()
-            except Exception:
-                body = ""
-        else:
-            body = step.script or ""
-
-    matches = WRITE_RESULT_PATTERN.findall(body)
-    return {m for m in matches if not m.startswith("__Y2B_")}
+    return _scan_written_vars(step, pattern=WRITE_RESULT_PATTERN)
 
 
 def _clean_script_body(body: str, is_file: bool = False) -> str:

@@ -5,18 +5,17 @@ import sys
 from pathlib import Path
 import pytest
 
-from y2b.config import Job, Invoke, RunCommand
-from y2b.dispatcher import (
+from y2shared.config import Job, Invoke, RunCommand
+from y2shared.dispatcher import (
     invoke_nowait,
     read_results,
-    dispatch_vm,
     classify_error,
     parse_run_command_output,
     AuthCircuitBreaker,
     AuthAbortedError,
 )
-from y2b.inputcsv import VMRow
-from y2b.vmlog import VMLogger
+from y2shared.inputcsv import VMRow
+from y2shared.vmlog import VMLogger
 
 FAKE_AZ_DIR = Path(__file__).parent / "fake_az"
 

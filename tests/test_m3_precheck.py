@@ -7,10 +7,10 @@ import time
 from pathlib import Path
 import pytest
 
-from y2b.config import Job, Precheck, Invoke
-from y2b.inputcsv import VMRow
-from y2b.precheck import PrecheckEngine
-from y2b.vmlog import VMLogger
+from y2shared.config import Job, Precheck, Invoke
+from y2shared.inputcsv import VMRow
+from y2shared.precheck import PrecheckEngine
+from y2shared.vmlog import VMLogger
 
 
 def create_test_vm(index: int, name: str, sub: str = "sub-1", rg: str = "rg-1") -> VMRow:

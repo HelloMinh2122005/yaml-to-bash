@@ -9,10 +9,10 @@ import time
 from pathlib import Path
 import pytest
 
-from y2b.collectlist import CollectList
-from y2b.config import load_job
-from y2b.parts import get_parts_dir, is_part_finished, is_part_still_running, get_run_info
-from y2b.runner import run_job
+from y2shared.collectlist import CollectList
+from y2shared.config import load_job
+from y2shared.parts import get_parts_dir, is_part_finished, is_part_still_running, get_run_info
+from y2shared.runner import run_job
 
 FAKE_AZ_DIR = Path(__file__).parent / "fake_az"
 
@@ -258,7 +258,7 @@ def test_resume_phase1_interruption(tmp_path, monkeypatch, setup_fire_and_forget
 
     # Simulate an interrupted Phase 1 run:
     # VM 1 was fired and has confirmed=False in collect_list (crash right after az call or during it)
-    from y2b.parts import init_parts_dir
+    from y2shared.parts import init_parts_dir
     import datetime
     run_id = init_parts_dir(parts_dir, job, total_rows=2, parallel=2)
 
@@ -405,10 +405,10 @@ def test_scheduler_unit_injected_clock(tmp_path):
     - VM busy on every attempt is read 1 + collect_retries times, collect_retry_interval apart, then ends ERROR:still_running.
     - VM busy once then done ends OK.
     """
-    from y2b.runner import run_collect_phase, RunState
-    from y2b.dispatcher import AuthCircuitBreaker, ReadResult
-    from y2b.inputcsv import VMRow
-    from y2b.parts import read_part_row, get_part_paths
+    from y2shared.runner import run_collect_phase, RunState
+    from y2shared.dispatcher import AuthCircuitBreaker, ReadResult
+    from y2shared.inputcsv import VMRow
+    from y2shared.parts import read_part_row, get_part_paths
     import threading
 
     job_path = create_job_and_csv(

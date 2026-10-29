@@ -10,9 +10,9 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from y2b.config import Job
-from y2b.inputcsv import VMRow
-from y2b.parts import get_part_paths, is_part_finished, read_part_row
+from y2shared.config import Job
+from y2shared.inputcsv import VMRow
+from y2shared.parts import get_part_paths, is_part_finished, read_part_row
 
 
 class MergeError(Exception):

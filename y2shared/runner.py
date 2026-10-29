@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import datetime
+import functools
 import heapq
 import itertools
 import os
@@ -15,22 +16,21 @@ import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from y2b.collectlist import CollectList
-from y2b.collector import collect_for_vm
-from y2b.compiler import compile_job, compile_collect_script
-from y2b.config import Job, load_job
-from y2b.dispatcher import (
+from y2shared.collectlist import CollectList
+from y2shared.collector import collect_for_vm
+from y2shared.config import Job, load_job
+from y2shared.dispatcher import (
     AuthCircuitBreaker,
     AuthAbortedError,
     invoke_nowait,
     read_results,
     ReadResult,
 )
-from y2b.inputcsv import VMRow, read_input_csv
-from y2b.merger import merge_parts, MergeError
-from y2b.parts import (
+from y2shared.inputcsv import VMRow, read_input_csv
+from y2shared.merger import merge_parts, MergeError
+from y2shared.parts import (
     get_parts_dir,
     init_parts_dir,
     get_run_info,
@@ -39,9 +39,11 @@ from y2b.parts import (
     is_part_still_running,
     write_part_files,
 )
-from y2b.precheck import PrecheckEngine
-from y2b.validate import validate_job_file
-from y2b.vmlog import VMLogger
+from y2shared.precheck import PrecheckEngine
+from y2shared.profile import Profile
+from y2shared.scan import build_var_to_step_map
+from y2shared.validate import validate_job_file
+from y2shared.vmlog import VMLogger
 
 
 @dataclass
@@ -103,6 +105,7 @@ def run_collect_phase(
     time_fn: Callable[[], float] = time.time,
     sleep_fn: Callable[[float], None] = time.sleep,
     read_fn: Callable[..., ReadResult] | None = None,
+    var_to_step: dict[str, int] | None = None,
 ) -> None:
     """
     Phase 2 Collect scheduler running on min-heap.
@@ -182,7 +185,7 @@ def run_collect_phase(
                         logger.log_error(f"Uncaught exception in collect: {e}\n{tb}")
                         marker = f"ERROR:internal:{err_type}"
                         logger.finalize(marker)
-                        row_vals = collect_for_vm(job, r, outcome_marker=marker, logger=logger)
+                        row_vals = collect_for_vm(job, r, outcome_marker=marker, logger=logger, var_to_step=var_to_step)
                         write_part_files(parts_dir, r, total_rows, row_vals, logger)
                         run_state.update("ERROR")
                         continue
@@ -195,18 +198,18 @@ def run_collect_phase(
                         else:
                             # Retries exhausted -> ERROR:still_running
                             logger.finalize("ERROR:still_running")
-                            row_vals = collect_for_vm(job, r, outcome_marker="ERROR:still_running", logger=logger)
+                            row_vals = collect_for_vm(job, r, outcome_marker="ERROR:still_running", logger=logger, var_to_step=var_to_step)
                             write_part_files(parts_dir, r, total_rows, row_vals, logger)
                             run_state.update("ERROR")
                     else:
                         # Completed OK or with error marker
                         if res.status == "OK":
-                            row_vals = collect_for_vm(job, r, remote_result=res, logger=logger)
+                            row_vals = collect_for_vm(job, r, remote_result=res, logger=logger, var_to_step=var_to_step)
                             logger.finalize("OK")
                             run_state.update("OK")
                         else:
                             marker = res.error or "ERROR:unknown"
-                            row_vals = collect_for_vm(job, r, outcome_marker=marker, logger=logger)
+                            row_vals = collect_for_vm(job, r, outcome_marker=marker, logger=logger, var_to_step=var_to_step)
                             logger.finalize(marker)
                             run_state.update("ERROR")
 
@@ -226,12 +229,16 @@ def run_collect_phase(
     sys.stderr.write("\n")
 
 
-def run_job(args: argparse.Namespace) -> int:
-    """Main execution function invoked by `y2b run`."""
+def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
+    """Main execution function invoked by `<tool> run`."""
+    if profile is None:
+        from y2b.profile import PROFILE
+        profile = PROFILE
+
     yaml_path = Path(args.job_yaml).resolve()
 
     # 1. Validation
-    job, val_res = validate_job_file(yaml_path)
+    job, val_res = validate_job_file(yaml_path, profile=profile)
     if not val_res.is_valid or job is None:
         for e in val_res.errors:
             print(f"ERROR: {e}", file=sys.stderr)
@@ -241,7 +248,7 @@ def run_job(args: argparse.Namespace) -> int:
         print(f"WARNING: {w}", file=sys.stderr)
 
     # 2. Read Input CSV
-    rows, headers, csv_res = read_input_csv(job.input, job=job)
+    rows, headers, csv_res = read_input_csv(job.input, job=job, os_family=profile.os_family)
     if not csv_res.is_valid:
         for e in csv_res.errors:
             print(f"ERROR: {e}", file=sys.stderr)
@@ -249,6 +256,9 @@ def run_job(args: argparse.Namespace) -> int:
 
     for w in csv_res.warnings:
         print(f"WARNING: {w}", file=sys.stderr)
+
+    # Precompute var-to-step map once per run
+    var_to_step = build_var_to_step_map(job, profile.write_result_re)
 
     # 3. Filter VMs (--vm and --limit)
     target_rows = rows
@@ -280,20 +290,20 @@ def run_job(args: argparse.Namespace) -> int:
         return 1
 
     # 5. Compile Remote & Collect Scripts
-    compiled_remote, compile_errors = compile_job(job, run_id=run_id)
+    compiled_remote, compile_errors = profile.compile_remote(job, run_id=run_id)
     if compile_errors:
         for e in compile_errors:
             print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
-    compiled_collect, collect_errors = compile_collect_script(job)
+    compiled_collect, collect_errors = profile.compile_collect(job)
     if collect_errors:
         for e in collect_errors:
             print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
-    remote_script_path = parts_dir / "remote.sh"
-    collect_script_path = parts_dir / "collect.sh"
+    remote_script_path = parts_dir / profile.remote_script_name
+    collect_script_path = parts_dir / profile.collect_script_name
     try:
         with open(remote_script_path, "w", encoding="utf-8") as f:
             f.write(compiled_remote)
@@ -325,7 +335,7 @@ def run_job(args: argparse.Namespace) -> int:
 
     # 7. Confirmation Prompt
     print(f"\n==================================================")
-    print(f"yaml_to_bash Run Plan (v2 Fire-and-Forget)")
+    print(f"{profile.title} Run Plan (v2 Fire-and-Forget)")
     print(f"  Job file:               {job.yaml_path.name}")
     print(f"  Target VMs:             {len(target_rows)} (from {job.input.name})")
     print(f"  Parallel:               {parallel}")
@@ -406,7 +416,7 @@ def run_job(args: argparse.Namespace) -> int:
                     # 1. Precheck
                     proceed, precheck_marker = precheck_engine.run_prechecks_for_vm(job, row, logger)
                     if not proceed:
-                        row_vals = collect_for_vm(job, row, outcome_marker=precheck_marker, logger=logger)
+                        row_vals = collect_for_vm(job, row, outcome_marker=precheck_marker, logger=logger, var_to_step=var_to_step)
                         logger.finalize(precheck_marker or "SKIPPED")
                         write_part_files(parts_dir, row, len(target_rows), row_vals, logger)
                         outcome_type = "SKIPPED" if "SKIPPED:" in (precheck_marker or "") else "ENDED"
@@ -416,7 +426,7 @@ def run_job(args: argparse.Namespace) -> int:
                     # 2. Dry run
                     if args.dry_run:
                         logger.log("[dry-run] Prechecks passed; skipping run-command execution.")
-                        row_vals = collect_for_vm(job, row, outcome_marker="DRY_RUN:ok", logger=logger)
+                        row_vals = collect_for_vm(job, row, outcome_marker="DRY_RUN:ok", logger=logger, var_to_step=var_to_step)
                         logger.finalize("DRY_RUN:ok")
                         write_part_files(parts_dir, row, len(target_rows), row_vals, logger)
                         run_state.update("OK")
@@ -442,6 +452,7 @@ def run_job(args: argparse.Namespace) -> int:
                         remote_script_path=remote_script_path,
                         logger=logger,
                         circuit_breaker=circuit_breaker,
+                        command_id=profile.command_id,
                     )
 
                     if invoke_res.success:
@@ -458,7 +469,7 @@ def run_job(args: argparse.Namespace) -> int:
 
                         # Write part file now with error marker
                         marker = invoke_res.error or "ERROR:unknown"
-                        row_vals = collect_for_vm(job, row, outcome_marker=marker, logger=logger)
+                        row_vals = collect_for_vm(job, row, outcome_marker=marker, logger=logger, var_to_step=var_to_step)
                         logger.finalize(marker)
                         write_part_files(parts_dir, row, len(target_rows), row_vals, logger)
                         run_state.update("ERROR")
@@ -470,7 +481,7 @@ def run_job(args: argparse.Namespace) -> int:
                         parts_dir=parts_dir,
                         row=row,
                         total_rows=len(target_rows),
-                        row_values=collect_for_vm(job, row, outcome_marker="ERROR:auth", logger=logger),
+                        row_values=collect_for_vm(job, row, outcome_marker="ERROR:auth", logger=logger, var_to_step=var_to_step),
                         logger=logger,
                     )
                     run_state.update("ERROR")
@@ -487,7 +498,7 @@ def run_job(args: argparse.Namespace) -> int:
                         parts_dir=parts_dir,
                         row=row,
                         total_rows=len(target_rows),
-                        row_values=collect_for_vm(job, row, outcome_marker=marker, logger=logger),
+                        row_values=collect_for_vm(job, row, outcome_marker=marker, logger=logger, var_to_step=var_to_step),
                         logger=logger,
                     )
                     run_state.update("ERROR")
@@ -511,13 +522,13 @@ def run_job(args: argparse.Namespace) -> int:
         if circuit_breaker.is_tripped:
             print("\nFATAL: Run aborted due to 5 consecutive Azure authentication failures in Phase 1.", file=sys.stderr)
             print(f"Part files preserved in: {parts_dir}", file=sys.stderr)
-            print(f"Rerun with: y2b run {job.yaml_path} --resume", file=sys.stderr)
+            print(f"Rerun with: {profile.tool} run {job.yaml_path} --resume", file=sys.stderr)
             return 3
 
         if ctrl_c_count > 0 or run_state.stop_requested:
             print(f"\nRun interrupted by user. Note: already-fired scripts keep running on the VMs.", file=sys.stderr)
             print(f"Part files preserved in: {parts_dir}", file=sys.stderr)
-            print(f"Rerun with: y2b run {job.yaml_path} --resume", file=sys.stderr)
+            print(f"Rerun with: {profile.tool} run {job.yaml_path} --resume", file=sys.stderr)
             return 3
 
         # ==============================================================================
@@ -538,6 +549,7 @@ def run_job(args: argparse.Namespace) -> int:
                         work_set.append((r, rec))
 
             if work_set:
+                bound_read_results = functools.partial(read_results, command_id=profile.command_id)
                 run_collect_phase(
                     job=job,
                     work_set=work_set,
@@ -549,19 +561,21 @@ def run_job(args: argparse.Namespace) -> int:
                     circuit_breaker=circuit_breaker,
                     run_state=run_state,
                     interrupted_event=interrupted_event,
+                    read_fn=bound_read_results,
+                    var_to_step=var_to_step,
                 )
 
         # Check circuit breaker & Ctrl-C after Phase 2
         if circuit_breaker.is_tripped:
             print("\nFATAL: Run aborted due to 5 consecutive Azure authentication failures in Phase 2.", file=sys.stderr)
             print(f"Part files preserved in: {parts_dir}", file=sys.stderr)
-            print(f"Rerun with: y2b run {job.yaml_path} --resume", file=sys.stderr)
+            print(f"Rerun with: {profile.tool} run {job.yaml_path} --resume", file=sys.stderr)
             return 3
 
         if ctrl_c_count > 0 or run_state.stop_requested:
             print(f"\nRun interrupted by user. Note: already-fired scripts keep running on the VMs.", file=sys.stderr)
             print(f"Part files preserved in: {parts_dir}", file=sys.stderr)
-            print(f"Rerun with: y2b run {job.yaml_path} --resume", file=sys.stderr)
+            print(f"Rerun with: {profile.tool} run {job.yaml_path} --resume", file=sys.stderr)
             return 3
 
     finally:
@@ -605,7 +619,7 @@ def run_job(args: argparse.Namespace) -> int:
     if has_still_running:
         print(f"\n[!] Notice: Some VMs were still running remotely when collection timed out.")
         print(f"    Part files preserved in: {parts_dir}")
-        print(f"    Rerun later to read remaining VMs: y2b run {job.yaml_path} --resume")
+        print(f"    Rerun later to read remaining VMs: {profile.tool} run {job.yaml_path} --resume")
 
     print("==================================================")
 

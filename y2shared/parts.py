@@ -11,9 +11,9 @@ import secrets
 from pathlib import Path
 from typing import Any
 
-from y2b.config import Job
-from y2b.inputcsv import VMRow
-from y2b.vmlog import VMLogger
+from y2shared.config import Job
+from y2shared.inputcsv import VMRow
+from y2shared.vmlog import VMLogger
 
 
 def get_parts_dir(output_csv: Path) -> Path:

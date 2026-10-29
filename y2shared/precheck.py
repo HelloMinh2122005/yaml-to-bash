@@ -6,10 +6,10 @@ import shlex
 import threading
 from typing import Any
 
-from y2b.config import Job, Precheck
-from y2b.inputcsv import VMRow
-from y2b.shell import run_bash
-from y2b.vmlog import VMLogger
+from y2shared.config import Job, Precheck
+from y2shared.inputcsv import VMRow
+from y2shared.shell import run_bash
+from y2shared.vmlog import VMLogger
 
 
 class PrecheckEngine:
