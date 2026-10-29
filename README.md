@@ -22,18 +22,22 @@ A declarative Azure VM automation framework designed to execute fleet-wide diagn
 - **Azure CLI**: `az` CLI installed and authenticated on the runner (`az login` or Managed Identity).
 - **Target VMs**: Linux VMs (`RunShellScript`).
 
-### Setup
+### Quick Setup & Virtual Environment
+
+You can automatically create the virtual environment, install dependencies (`PyYAML`, `pytest`), and activate `y2b` in one command:
 
 ```bash
 # Clone or navigate to repository
 cd yaml_to_bash
 
-# Make launcher executable
-chmod +x bin/y2b
+# Create, install requirements & activate .venv in your current shell:
+source setup_venv.sh
 
-# Optional: Add to PATH or symlink to ~/.local/bin
-cp bin/y2b ~/.local/bin/y2b
+# y2b is now ready in your PATH!
+y2b --help
 ```
+
+*(Alternatively, manual setup: `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt && chmod +x bin/y2b`).*
 
 ---
 

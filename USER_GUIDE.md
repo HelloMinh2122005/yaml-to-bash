@@ -87,19 +87,21 @@ Traditional automation runs a separate SSH command or Azure Run-Command per chec
    ```
    *(Or running under an Azure Managed Identity on a VM runner).*
 
-### Installing the CLI Launcher
-Make the launcher executable and add it to your `PATH`:
+### Automated Virtual Environment Setup
+
+The repository provides `setup_venv.sh` and `requirements.txt` to automatically initialize the Python virtual environment, install dependencies (`PyYAML`, `pytest`), and put `y2b` into your shell's `PATH`:
+
 ```bash
 cd yaml_to_bash
-chmod +x bin/y2b
 
-# Symlink or copy to your user bin directory:
-mkdir -p ~/.local/bin
-cp bin/y2b ~/.local/bin/y2b
+# Create venv, install requirements and activate in current shell:
+source setup_venv.sh
 
-# Verify installation:
+# Verify CLI is ready:
 y2b --help
 ```
+
+*(If executed as `./setup_venv.sh`, it prepares the `.venv` and prompts you to activate it with `source .venv/bin/activate` or `source setup_venv.sh`).*
 
 ---
 
