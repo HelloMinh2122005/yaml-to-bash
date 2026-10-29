@@ -1,13 +1,37 @@
-# yaml_to_bash (`y2b`)
+# yaml_to_bash (`y2b`) & yaml_to_powershell (`y2p`)
 
 A declarative Azure VM automation framework designed to execute fleet-wide diagnostics, configuration, and compliance checks across hundreds of virtual machines (500+ VMs) via Azure CLI (`az vm run-command invoke`).
 
-> 📖 **Looking for the comprehensive user manual?** See [USER_GUIDE.md](USER_GUIDE.md) for an in-depth walkthrough, YAML schema authoring guide, precheck & computed column chaining tutorials, and troubleshooting tips.
+The framework provides two specialized frontends backed by a common, robust orchestration engine:
+- **`y2b` (`yaml_to_bash`)**: For Azure Linux virtual machines (`RunShellScript` with bash payloads).
+- **`y2p` (`yaml_to_powershell`)**: For Azure Windows virtual machines (`RunPowerShellScript` with Windows PowerShell 5.1 payloads).
+
+Both tools run on **macOS (Apple Silicon / Intel with zsh)** and **Linux** hosts.
+
+> 📖 **Looking for the comprehensive user manual?** See [USER_GUIDE.md](USER_GUIDE.md) for an in-depth walkthrough, YAML schema authoring guide, precheck & computed column chaining tutorials, Windows/y2p guide, and troubleshooting tips.
 
 ---
 
-## 1. Key Highlights
+## 1. Architecture & Feature Matrix
 
+The shared engine (`y2shared`) handles host-side prechecks, concurrency control, fire-and-forget two-phase scheduling, Azure CLI retry/backoff, and part-file merging. The frontends (`y2b` and `y2p`) supply OS-specific validation, compilation templates, and remote output parsing:
+
+| Feature / Dimension | `y2b` (Linux) | `y2p` (Windows) |
+|---|---|---|
+| **CLI Command** | `bin/y2b` or `python3 -m y2b` | `bin/y2p` or `python3 -m y2p` |
+| **Target Guest OS** | Linux (RHEL, Rocky, Ubuntu, Debian, SLES...) | Windows (Server 2016/2019/2022/2025, Win 10/11) |
+| **Azure Command ID** | `RunShellScript` | `RunPowerShellScript` |
+| **Remote Script Engine** | POSIX / bash subshell | Windows PowerShell 5.1 |
+| **Path Conventions** | `/var/tmp/runcommand/result.res` | `C:\ProgramData\y2p\result.res` |
+| **Step Result Function** | `write_result KEY VALUE` | `write_result KEY VALUE` (alias `Write-Y2Result`) |
+| **Host Prechecks** | Bash (executed on runner host) | Bash (executed on runner host) |
+| **Host Computed Columns** | Bash (executed on runner host) | Bash (executed on runner host) |
+| **Output JSON Format** | Standard Azure `[stdout]` / `[stderr]` string | Azure two-element `ComponentStatus/StdOut/succeeded` |
+| **Timeout Handling** | Native `timeout <sec> bash -c ...` | `Start-Process` with process tree kill (`taskkill /T /F`) |
+| **Example Directory** | `examples/hip-compliance/` | `examples/windows-baseline/` |
+| **Golden Test File** | `tests/golden/hip_compliance_remote.sh` | `tests/golden/windows_baseline_remote.ps1` |
+
+### Key Highlights
 - **Fire-and-Forget Two-Phase Execution**: In Phase 1 (Invoke), remote scripts are fired asynchronously via `az vm run-command invoke --no-wait`. In Phase 2 (Collect), the host collects results via reader scripts on an event scheduler. Workers are never held blocked waiting for remote scripts to complete.
 - **Host-Side Prechecks with Subscription Caching**: Verify tenant subscriptions or VM power states before running commands; memoize checks per subscription (`cache: subscription`) to prevent redundant queries. Non-target/skipped VMs never enter the collect phase.
 - **Zero-Corruption Concurrency (Part Files & Merge)**: Workers write exclusively to per-VM part files (`NNNN-<vm_name>.csv` / `.log`). A single-threaded merge step builds `result.csv` and `result.log` in original input order after all workers complete.
@@ -18,13 +42,16 @@ A declarative Azure VM automation framework designed to execute fleet-wide diagn
 
 ## 2. Requirements & Installation
 
-- **Runner**: Linux host with **Python ≥ 3.9** and **PyYAML** (`pip install pyyaml`).
+- **Runner Host**: macOS (zsh, Python ≥ 3.9) or Linux host.
+- **Python**: Python ≥ 3.9 and PyYAML (`pip install pyyaml`).
 - **Azure CLI**: `az` CLI installed and authenticated on the runner (`az login` or Managed Identity).
-- **Target VMs**: Linux VMs (`RunShellScript`).
+- **Target VMs**:
+  - Linux VMs with Azure Linux Agent for `y2b`.
+  - Windows VMs with Azure Windows Guest Agent for `y2p`.
 
 ### Quick Setup & Virtual Environment
 
-You can automatically create the virtual environment, install dependencies (`PyYAML`, `pytest`), and activate `y2b` in one command:
+You can automatically create the virtual environment, install dependencies (`PyYAML`, `pytest`), and activate `y2b` and `y2p` in one command:
 
 ```bash
 # Clone or navigate to repository
@@ -33,47 +60,74 @@ cd yaml_to_bash
 # Create, install requirements & activate .venv in your current shell:
 source setup_venv.sh
 
-# y2b is now ready in your PATH!
+# Both tools are now ready on your PATH!
 y2b --help
+y2p --help
 ```
 
-*(Alternatively, manual setup: `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt && chmod +x bin/y2b`).*
+*(Alternatively: `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt && chmod +x bin/y2b bin/y2p`).*
 
 ---
 
-## 3. CLI Usage
+## 3. Host Environment & macOS Considerations
+
+Both `y2b` and `y2p` include built-in host environment hardening when executed on macOS (Darwin) runners:
+
+1. **Host Bash Resolution**: macOS ships with `/bin/bash` 3.2. Host prechecks and computed columns execute using bash resolved via `y2shared.hostenv`:
+   - If `$Y2_BASH` is set, that binary is used.
+   - Otherwise, the first `bash` on `PATH` is used.
+   - If the resolved bash version is < 4.0, a friendly warning is emitted recommending `brew install bash`. Host scripts in `examples/` are 3.2-compatible out of the box.
+2. **File Descriptor Limits**: macOS defaults to `ulimit -n 256`, which can exhaust descriptors during high concurrency. At run start, the soft open-file limit is automatically raised up to 4096 (or the system hard limit) via `raise_nofile()`.
+3. **Sleep Prevention**: Long runs during `sleep_before_collect` or collection could stall if the laptop sleeps. On macOS, `caffeinate -i -w <pid>` is automatically started for the duration of the run. (Note: Keep laptops connected to AC power, as closing the lid on battery will still sleep).
+4. **Zsh Glob Quoting**: In zsh, unquoted glob patterns like `--vm vm-[01]` will fail with `zsh: no matches found`. Always quote arguments containing glob characters: `--vm "vm-[01]"`.
+5. **Recommended Concurrency**: For macOS runner workstations with 16 GB RAM, `--parallel 20` to `30` is recommended.
+
+---
+
+## 4. CLI Usage
+
+Both `y2b` and `y2p` share identical subcommands and flags.
 
 ### Validate Configuration & Input CSV
 ```bash
+# Linux job validation
 y2b validate examples/hip-compliance/job.yaml
+
+# Windows job validation
+y2p validate examples/windows-baseline/job.yaml
 ```
-Checks YAML schema integrity, validates script paths, inspects the CSV header and VM rows (duplicate check, Linux OS verification).
+Checks YAML schema integrity, validates script paths and syntax, inspects the CSV header and VM rows (verifies correct OS family, prevents cross-tool mismatch).
 
 ### Compile Remote Payload
 ```bash
-# Inspect the composite script that VMs will receive
+# Preview the remote payload
 y2b compile examples/hip-compliance/job.yaml
+y2p compile examples/windows-baseline/job.yaml
 
 # Save to file
 y2b compile examples/hip-compliance/job.yaml -o remote.sh
+y2p compile examples/windows-baseline/job.yaml -o remote.ps1
 ```
 
 ### Execute Run
 ```bash
-# Full execution across all VMs
+# Full execution across all target VMs
 y2b run examples/hip-compliance/job.yaml
+y2p run examples/windows-baseline/job.yaml
 
 # Filter by VM name and concurrency
 y2b run examples/hip-compliance/job.yaml --vm vm-app-01 --vm vm-app-02 --parallel 20 --yes
 
 # Limit to first N VMs
-y2b run examples/hip-compliance/job.yaml --limit 10
+y2p run examples/windows-baseline/job.yaml --limit 10
 
 # Dry run (run prechecks, compile payload, skip run-command)
 y2b run examples/hip-compliance/job.yaml --dry-run
+y2p run examples/windows-baseline/job.yaml --dry-run
 
 # Resume an interrupted run
 y2b run examples/hip-compliance/job.yaml --resume
+y2p run examples/windows-baseline/job.yaml --resume
 
 # Keep per-VM part files for debugging
 y2b run examples/hip-compliance/job.yaml --keep-parts
@@ -84,87 +138,6 @@ y2b run examples/hip-compliance/job.yaml --keep-parts
 - `1`: Configuration, YAML schema, or input CSV validation error.
 - `2`: Run finished, but some VMs had non-OK outcomes (`SKIPPED`, `ENDED`, or `ERROR`).
 - `3`: Run aborted (Ctrl-C, 5 consecutive authentication failures, or merge error).
-
----
-
-## 4. Writing Jobs
-
-A job definition specifies three sections:
-
-```yaml
-input: "./list_vm.csv"             # Target VMs list
-output_log: "./result.log"         # Consolidated log file
-output_csv: "./result.csv"         # Final report CSV
-actions: "skip"                    # Power state policy: "skip" | "start"
-parallel: 10                       # Concurrent VM workers
-sleep_before_collect: "5m"         # REQUIRED. Delay between a VM's invoke and first collect attempt
-collect_retry_interval: "30s"      # Optional (default 30s). Wait before re-reading still-busy VM
-collect_retries: 3                 # Optional (default 3). Re-reads after first attempt
-
-invoke:
-  precheck:
-    - name: "check-sub"
-      cache: "subscription"        # Query once per subscription
-      script: |
-        az account show --subscription "$SUBSCRIPTION" > /dev/null 2>&1
-        echo $?
-      result:
-        0:
-          log: "Valid subscription"
-          action: "continue"
-        default:
-          log: "Invalid subscription"
-          action: "end_check"
-
-  runcommand:
-    res_file: "/var/tmp/runcommand/result.res"
-    log_file: "/var/tmp/runcommand/result.log"
-    steps:
-      - name: "check-hip-version"
-        script: |
-          VERSION=$(rpm -q --queryformat '%{VERSION}' hip 2>/dev/null || echo "NOT_INSTALLED")
-          write_result HIP_VERSION "$VERSION"
-
-      - name: "check-kernel-count"
-        timeout: 120
-        script: |
-          COUNT=$(dnf repoquery --installed kernel 2>/dev/null | wc -l)
-          write_result KERNEL_COUNT "$COUNT"
-
-collect:
-  - column: "vm_name"
-    source: "input.vm_name"
-
-  - column: "hip_version"
-    var: "HIP_VERSION"
-
-  - column: "recommendation"
-    script: |
-      if [ "$HIP_VERSION" = "NOT_INSTALLED" ]; then
-        echo "Install HIP"
-      else
-        echo "Compliant"
-      fi
-
-  - column: "extended_compliance"
-    script_path: "./scripts/calc_compliance.sh"
-```
-
-### Remote Scripts Contract
-- Steps no longer declare `var:`. The step script names its results explicitly using `write_result NAME VALUE`.
-- A single step can write multiple variables (e.g. `write_result VAR_A "$A"`, `write_result VAR_B "$B"`).
-- `NAME` must match `^[A-Z_][A-Z0-9_]*$` and cannot start with `__Y2B_` (reserved).
-- `write_result` base64-encodes values into `$RES_FILE` and logs human-readable text to `$LOG_FILE`.
-- The remote script initializes `$RES_FILE` with run markers (`__Y2B_RUN__` and `__Y2B_DONE__`).
-- Each step runs in an isolated `bash -c` subshell with timeout protection and records its execution status (`ok`, `rc=N`, or `timeout`).
-- When a collect column `var: X` is evaluated:
-  1. If `X` was written, its value is used (written values always win, even if the step later failed).
-  2. If `X` was not written and the step that statically writes `X` failed, the column receives `__ERROR__ <status>` (e.g. `__ERROR__ rc=1`, `__ERROR__ timeout`).
-  3. Otherwise, the column receives `__MISSING__`.
-
-### Host Collection Contract
-- Evaluated in `collect` order.
-- Each evaluated column is exported to subsequent computed columns as `COL_<COLUMN_UPPER>` (e.g. `$COL_RECOMMENDATION`).
 
 ---
 
@@ -191,17 +164,18 @@ collect:
 
 ## 6. Testing
 
-The framework includes a test suite covering:
-- YAML schema and input CSV validation rules
-- Compiler payload generation and golden file matching
-- Real Linux container testing (`rockylinux:9` via Podman/Docker)
-- Precheck caching and action policy execution
-- Azure CLI error dispatching and retries using a fake `az` CLI
-- Concurrency test (500 VMs at parallel 50 matching parallel 1)
-- Resuming interrupted runs
+The framework includes a comprehensive test suite (100+ tests) covering:
+- Shared engine components (scheduler, dispatcher, collector, merger, collect-list).
+- Host environment utilities (bash resolution, fd limit raising, caffeinate lifecycle).
+- Input CSV OS validation (Linux rows for `y2b`, Windows rows for `y2p`).
+- Golden file validation for both `y2b` (`tests/golden/hip_compliance_remote.sh`) and `y2p` (`tests/golden/windows_baseline_remote.ps1`).
+- Real container payloads:
+  - Linux container test (`rockylinux:9` via Podman/Docker).
+  - Windows PowerShell test (`mcr.microsoft.com/powershell:7.4-ubuntu-22.04` via Podman/Docker).
+- Azure CLI error dispatching, retry logic, and auth circuit breaker.
+- Full 20-VM integration runs with mock `az`.
 
-Run the tests:
+Run the full test suite:
 ```bash
 python3 -m pytest tests/ -v
 ```
-

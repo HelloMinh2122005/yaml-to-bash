@@ -1,0 +1,4 @@
+vm_name,resource_group,subscription,os
+win-app-01,rg-prod-eastus,sub-prod-01,windows2022
+win-app-02,rg-prod-eastus,sub-prod-01,windows2022
+

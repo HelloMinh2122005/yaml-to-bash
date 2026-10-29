@@ -23,6 +23,14 @@ if "run-command" in args or "get-instance-view" in args or "start" in args:
         sys.stderr.write("FATAL: az command executed without --subscription flag\n")
         sys.exit(1)
 
+# Check expected command id if configured
+expected_cmd = os.environ.get("FAKE_AZ_EXPECT_CMD")
+if expected_cmd and "--command-id" in args:
+    c_idx = args.index("--command-id")
+    if c_idx + 1 < len(args) and args[c_idx + 1] != expected_cmd:
+        sys.stderr.write(f"FATAL: expected command id '{expected_cmd}', got '{args[c_idx + 1]}'\n")
+        sys.exit(1)
+
 # Extract VM name if present
 vm_name = None
 if "-n" in args:
@@ -177,7 +185,7 @@ if "run-command" in args and "invoke" in args:
                 if os.path.exists(s_path):
                     with open(s_path, "r", encoding="utf-8") as f:
                         content = f.read()
-                    m = re.search(r"Y2B_RUN_ID=([^\s]+)", content)
+                    m = re.search(r"(?:Y2B_RUN_ID=|\$Y2B_RUN_ID\s*=\s*)([^\s;]+)", content)
                     if m:
                         run_id = m.group(1).strip("'\"")
 
@@ -261,6 +269,47 @@ if "run-command" in args and "invoke" in args:
     # Success output
     b64_run = base64.b64encode(run_id.encode("utf-8")).decode("ascii")
     b64_ok = base64.b64encode(b"ok").decode("ascii")
+
+    is_powershell = "--command-id" in args and "RunPowerShellScript" in args
+
+    if is_powershell:
+        b64_true = base64.b64encode(b"True").decode("ascii")
+        b64_age = base64.b64encode(b"0").decode("ascii")
+        b64_hf = base64.b64encode(b"KB5012345").decode("ascii")
+        b64_build = base64.b64encode(b"20348").decode("ascii")
+        b64_tls = base64.b64encode(b"1").decode("ascii")
+        stdout_msg = (
+            "===BEGIN_RESULT_RES===\n"
+            f"__Y2B_RUN__={b64_run}\n"
+            f"__Y2B_STEP_1__={b64_ok}\n"
+            f"__Y2B_STEP_2__={b64_ok}\n"
+            f"__Y2B_STEP_3__={b64_ok}\n"
+            f"__Y2B_STEP_4__={b64_ok}\n"
+            f"DEFENDER_ENABLED={b64_true}\n"
+            f"SIGNATURE_AGE_DAYS={b64_age}\n"
+            f"LAST_HOTFIX={b64_hf}\n"
+            f"OS_BUILD={b64_build}\n"
+            f"TLS12_ENABLED={b64_tls}\n"
+            f"__Y2B_DONE__={b64_run}\n"
+            "===END_RESULT_RES===\n"
+        )
+        payload = {
+            "value": [
+                {
+                    "code": "ComponentStatus/StdOut/succeeded",
+                    "displayStatus": "Provisioning succeeded",
+                    "message": stdout_msg,
+                },
+                {
+                    "code": "ComponentStatus/StdErr/succeeded",
+                    "displayStatus": "Provisioning succeeded",
+                    "message": "",
+                },
+            ]
+        }
+        print(json.dumps(payload))
+        sys.exit(0)
+
     payload = {
         "value": [
             {
