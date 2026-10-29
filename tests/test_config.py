@@ -2,7 +2,7 @@
 
 from pathlib import Path
 import pytest
-from y2b.config import load_job, parse_job_from_dict, compute_content_hash
+from y2b.config import load_job, parse_job_from_dict, compute_content_hash, parse_duration
 
 
 def test_load_example_job():
@@ -16,6 +16,9 @@ def test_load_example_job():
     assert job.output_log == (job.yaml_dir / "result.log").resolve()
     assert job.actions == "skip"
     assert job.parallel == 10
+    assert job.sleep_before_collect == 300.0
+    assert job.collect_retry_interval == 30.0
+    assert job.collect_retries == 3
     assert len(job.invoke.precheck) == 2
     assert job.invoke.precheck[0].name == "check-if-subscription-in-tenant"
     assert "0" in job.invoke.precheck[0].result
@@ -24,7 +27,7 @@ def test_load_example_job():
     assert job.invoke.runcommand.res_file == "/var/tmp/runcommand/result.res"
     assert job.invoke.runcommand.log_file == "/var/tmp/runcommand/result.log"
     assert len(job.invoke.runcommand.steps) == 3
-    assert job.invoke.runcommand.steps[0].var == "HIP_VERSION"
+    assert job.invoke.runcommand.steps[0].name == "check-hip-version"
     assert job.invoke.runcommand.steps[2].script_path == (job.yaml_dir / "scripts/audit_hardware.sh").resolve()
 
     assert len(job.collect) == 8
@@ -36,6 +39,28 @@ def test_load_example_job():
     assert "EXPECTED" in job.collect[6].script
     assert job.collect[7].column == "extended_compliance"
     assert job.collect[7].script_path == (job.yaml_dir / "scripts/calc_compliance.sh").resolve()
+
+
+def test_parse_duration():
+    assert parse_duration(90) == 90.0
+    assert parse_duration("90") == 90.0
+    assert parse_duration("30s") == 30.0
+    assert parse_duration("5m") == 300.0
+    assert parse_duration("1h") == 3600.0
+    assert parse_duration("1m30s") == 90.0
+    assert parse_duration("0") == 0.0
+    assert parse_duration(0) == 0.0
+
+    with pytest.raises(ValueError):
+        parse_duration("5x")
+    with pytest.raises(ValueError):
+        parse_duration("")
+    with pytest.raises(ValueError):
+        parse_duration(-1)
+    with pytest.raises(ValueError):
+        parse_duration("-1s")
+    with pytest.raises(ValueError):
+        parse_duration(True)
 
 
 def test_compute_content_hash():

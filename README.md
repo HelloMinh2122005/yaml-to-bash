@@ -8,8 +8,8 @@ A declarative Azure VM automation framework designed to execute fleet-wide diagn
 
 ## 1. Key Highlights
 
-- **Single Run-Command Session per VM**: All remote steps are compiled into a single composite bash script, executed in a single `az vm run-command invoke` session per VM. Eliminates ARM rate limiting and avoids massive multi-minute API delays.
-- **Host-Side Prechecks with Subscription Caching**: Verify tenant subscriptions or VM power states before running commands; memoize checks per subscription (`cache: subscription`) to prevent redundant queries.
+- **Fire-and-Forget Two-Phase Execution**: In Phase 1 (Invoke), remote scripts are fired asynchronously via `az vm run-command invoke --no-wait`. In Phase 2 (Collect), the host collects results via reader scripts on an event scheduler. Workers are never held blocked waiting for remote scripts to complete.
+- **Host-Side Prechecks with Subscription Caching**: Verify tenant subscriptions or VM power states before running commands; memoize checks per subscription (`cache: subscription`) to prevent redundant queries. Non-target/skipped VMs never enter the collect phase.
 - **Zero-Corruption Concurrency (Part Files & Merge)**: Workers write exclusively to per-VM part files (`NNNN-<vm_name>.csv` / `.log`). A single-threaded merge step builds `result.csv` and `result.log` in original input order after all workers complete.
 - **Resilient & Resumable**: Safely resume interrupted runs (`--resume`) without repeating work on finished VMs. Built-in auth circuit breaker, exponential backoff with jitter on Azure throttling, and conflict retries.
 - **Safe Evaluation**: Remote values are stored base64-encoded to prevent shell injection, and computed columns run isolated on the host with exported environment variables.
@@ -97,8 +97,9 @@ output_log: "./result.log"         # Consolidated log file
 output_csv: "./result.csv"         # Final report CSV
 actions: "skip"                    # Power state policy: "skip" | "start"
 parallel: 10                       # Concurrent VM workers
-sleep_before_collect: 0            # Optional delay before collection
-run_timeout: 1800                  # Per-VM run-command timeout in seconds
+sleep_before_collect: "5m"         # REQUIRED. Delay between a VM's invoke and first collect attempt
+collect_retry_interval: "30s"      # Optional (default 30s). Wait before re-reading still-busy VM
+collect_retries: 3                 # Optional (default 3). Re-reads after first attempt
 
 invoke:
   precheck:
@@ -120,17 +121,15 @@ invoke:
     log_file: "/var/tmp/runcommand/result.log"
     steps:
       - name: "check-hip-version"
-        var: "HIP_VERSION"
         script: |
           VERSION=$(rpm -q --queryformat '%{VERSION}' hip 2>/dev/null || echo "NOT_INSTALLED")
-          write_result "$VERSION"
+          write_result HIP_VERSION "$VERSION"
 
       - name: "check-kernel-count"
-        var: "KERNEL_COUNT"
         timeout: 120
         script: |
           COUNT=$(dnf repoquery --installed kernel 2>/dev/null | wc -l)
-          write_result "$COUNT"
+          write_result KERNEL_COUNT "$COUNT"
 
 collect:
   - column: "vm_name"
@@ -152,10 +151,16 @@ collect:
 ```
 
 ### Remote Scripts Contract
-- Each step uses `write_result "<value>"`.
-- Helper function records base64-encoded values in `$RES_FILE` and human-readable text in `$LOG_FILE`.
-- The remote script truncates `$RES_FILE` at start (`: > "$RES_FILE"`).
-- Each step runs in an isolated `bash -c` subshell with timeout protection; if a step crashes or times out, it exports `__ERROR__ rc=<exit_code>` or `__ERROR__ timeout` without aborting subsequent steps.
+- Steps no longer declare `var:`. The step script names its results explicitly using `write_result NAME VALUE`.
+- A single step can write multiple variables (e.g. `write_result VAR_A "$A"`, `write_result VAR_B "$B"`).
+- `NAME` must match `^[A-Z_][A-Z0-9_]*$` and cannot start with `__Y2B_` (reserved).
+- `write_result` base64-encodes values into `$RES_FILE` and logs human-readable text to `$LOG_FILE`.
+- The remote script initializes `$RES_FILE` with run markers (`__Y2B_RUN__` and `__Y2B_DONE__`).
+- Each step runs in an isolated `bash -c` subshell with timeout protection and records its execution status (`ok`, `rc=N`, or `timeout`).
+- When a collect column `var: X` is evaluated:
+  1. If `X` was written, its value is used (written values always win, even if the step later failed).
+  2. If `X` was not written and the step that statically writes `X` failed, the column receives `__ERROR__ <status>` (e.g. `__ERROR__ rc=1`, `__ERROR__ timeout`).
+  3. Otherwise, the column receives `__MISSING__`.
 
 ### Host Collection Contract
 - Evaluated in `collect` order.
@@ -170,6 +175,10 @@ collect:
 | `OK` | Prechecks, dispatch, and collection succeeded | Normal report row |
 | `SKIPPED:<precheck>` | VM stopped by precheck with action `skip` | Passthrough columns kept, other columns marked `SKIPPED:...` |
 | `ENDED:<precheck>` | VM stopped by precheck with action `end_check` | Passthrough columns kept, other columns marked `ENDED:...` |
+| `ERROR:still_running` | The VM was still busy after the sleep and every collect retry | Retried up to `collect_retries` times; parts folder preserved, can be read later with `--resume` |
+| `ERROR:remote_incomplete` | The script started but did not write the done marker | Script killed, VM rebooted, or exceeded Azure's 90-minute cap |
+| `ERROR:stale_result` | `$RES_FILE` belongs to another run | Logged, no retry |
+| `ERROR:not_started` | `$RES_FILE` is missing or empty: the fired script never ran | Logged, no retry |
 | `ERROR:throttled` | Azure ARM rate limit (429 / TooManyRequests) | Exponential backoff with jitter (15s, 30s, 60s, 120s, 240s) before marking error |
 | `ERROR:run_command_busy` | Conflicting run-command already active on VM | Retried up to 3 times with 60s wait |
 | `ERROR:vm_agent_unavailable` | Guest agent unresponsive | Logged, no retry |

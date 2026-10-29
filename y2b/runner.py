@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import datetime
+import heapq
+import itertools
 import os
 import signal
 import sys
@@ -14,16 +17,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from y2b.collectlist import CollectList
 from y2b.collector import collect_for_vm
-from y2b.compiler import compile_job
+from y2b.compiler import compile_job, compile_collect_script
 from y2b.config import Job, load_job
-from y2b.dispatcher import AuthCircuitBreaker, AuthAbortedError, dispatch_vm
+from y2b.dispatcher import (
+    AuthCircuitBreaker,
+    AuthAbortedError,
+    invoke_nowait,
+    read_results,
+    ReadResult,
+)
 from y2b.inputcsv import VMRow, read_input_csv
 from y2b.merger import merge_parts, MergeError
 from y2b.parts import (
     get_parts_dir,
     init_parts_dir,
+    get_run_info,
+    update_run_phase,
     is_part_finished,
+    is_part_still_running,
     write_part_files,
 )
 from y2b.precheck import PrecheckEngine
@@ -55,7 +68,7 @@ class RunState:
             else:
                 self.error += 1
 
-    def format_progress(self, active_workers: int) -> str:
+    def format_progress(self, phase_name: str, active_workers: int) -> str:
         with self.lock:
             elapsed = time.time() - self.start_time
             if self.completed > 0:
@@ -70,10 +83,147 @@ class RunState:
                 eta_str = "--"
 
             return (
-                f"[ {self.completed}/{self.total_vms} ] "
+                f"[{phase_name}] [ {self.completed}/{self.total_vms} ] "
                 f"ok {self.ok} · skipped {self.skipped} · ended {self.ended} · error {self.error} · "
                 f"running {active_workers} · eta {eta_str}"
             )
+
+
+def run_collect_phase(
+    job: Job,
+    work_set: list[tuple[VMRow, dict[str, Any]]],
+    parts_dir: Path,
+    collect_script_path: Path,
+    run_id: str,
+    total_rows: int,
+    parallel: int,
+    circuit_breaker: AuthCircuitBreaker,
+    run_state: RunState,
+    interrupted_event: threading.Event,
+    time_fn: Callable[[], float] = time.time,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    read_fn: Callable[..., ReadResult] | None = None,
+) -> None:
+    """
+    Phase 2 Collect scheduler running on min-heap.
+    Waiting occurs in the heap, never holding a worker thread with time.sleep.
+    """
+    if not work_set:
+        return
+
+    actual_read_fn = read_fn or read_results
+    seq_gen = itertools.count()
+    heap: list[tuple[float, int, VMRow, dict[str, Any], int]] = []
+    now = time_fn()
+
+    for r, rec in work_set:
+        if is_part_still_running(parts_dir, r, total_rows):
+            first_ready_at = now
+        else:
+            try:
+                invoked_dt = datetime.datetime.fromisoformat(rec["invoked_at"])
+                invoked_ts = invoked_dt.timestamp()
+            except Exception:
+                invoked_ts = now
+            first_ready_at = invoked_ts + job.sleep_before_collect
+
+        heapq.heappush(heap, (first_ready_at, next(seq_gen), r, rec, 0))
+
+    def collect_worker_task(
+        r: VMRow,
+        rec: dict[str, Any],
+    ) -> tuple[VMRow, ReadResult, VMLogger]:
+        logger = VMLogger.from_lines(r.vm_name, r.index, rec.get("log", []))
+        res = actual_read_fn(
+            row=r,
+            collect_script_path=collect_script_path,
+            run_id=run_id,
+            logger=logger,
+            circuit_breaker=circuit_breaker,
+        )
+        return r, res, logger
+
+    in_flight: dict[concurrent.futures.Future, tuple[VMRow, dict[str, Any], int]] = {}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as executor:
+        while (heap or in_flight) and not run_state.stop_requested:
+            now = time_fn()
+            # Submit ready tasks up to concurrency limit
+            while len(in_flight) < parallel and heap and heap[0][0] <= now:
+                ready_at, _, r, rec, retries = heapq.heappop(heap)
+                fut = executor.submit(collect_worker_task, r, rec)
+                in_flight[fut] = (r, rec, retries)
+
+            # Wait for at least one in-flight task to finish
+            if in_flight:
+                if len(in_flight) < parallel and heap:
+                    wait_timeout = max(0.0, heap[0][0] - time_fn())
+                else:
+                    wait_timeout = None
+
+                done, _ = concurrent.futures.wait(
+                    in_flight.keys(),
+                    timeout=wait_timeout,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+
+                for fut in done:
+                    r, rec, retries = in_flight.pop(fut)
+                    try:
+                        r, res, logger = fut.result()
+                    except AuthAbortedError:
+                        run_state.stop_requested = True
+                        interrupted_event.set()
+                        break
+                    except Exception as e:
+                        err_type = type(e).__name__
+                        tb = traceback.format_exc()
+                        logger = VMLogger.from_lines(r.vm_name, r.index, rec.get("log", []))
+                        logger.log_error(f"Uncaught exception in collect: {e}\n{tb}")
+                        marker = f"ERROR:internal:{err_type}"
+                        logger.finalize(marker)
+                        row_vals = collect_for_vm(job, r, outcome_marker=marker, logger=logger)
+                        write_part_files(parts_dir, r, total_rows, row_vals, logger)
+                        run_state.update("ERROR")
+                        continue
+
+                    if res.status == "STILL_RUNNING":
+                        if retries < job.collect_retries:
+                            next_ready = time_fn() + job.collect_retry_interval
+                            rec["log"] = list(logger.lines)
+                            heapq.heappush(heap, (next_ready, next(seq_gen), r, rec, retries + 1))
+                        else:
+                            # Retries exhausted -> ERROR:still_running
+                            logger.finalize("ERROR:still_running")
+                            row_vals = collect_for_vm(job, r, outcome_marker="ERROR:still_running", logger=logger)
+                            write_part_files(parts_dir, r, total_rows, row_vals, logger)
+                            run_state.update("ERROR")
+                    else:
+                        # Completed OK or with error marker
+                        if res.status == "OK":
+                            row_vals = collect_for_vm(job, r, remote_result=res, logger=logger)
+                            logger.finalize("OK")
+                            run_state.update("OK")
+                        else:
+                            marker = res.error or "ERROR:unknown"
+                            row_vals = collect_for_vm(job, r, outcome_marker=marker, logger=logger)
+                            logger.finalize(marker)
+                            run_state.update("ERROR")
+
+                        write_part_files(parts_dir, r, total_rows, row_vals, logger)
+
+                    sys.stderr.write("\r" + run_state.format_progress("Phase 2: Collect", len(in_flight)) + "   ")
+                    sys.stderr.flush()
+
+            elif heap:
+                wait_time = max(0.0, heap[0][0] - time_fn())
+                if wait_time > 0:
+                    sleep_fn(min(wait_time, 0.5))
+
+        if run_state.stop_requested and in_flight:
+            concurrent.futures.wait(in_flight.keys())
+
+    sys.stderr.write("\n")
 
 
 def run_job(args: argparse.Namespace) -> int:
@@ -115,17 +265,10 @@ def run_job(args: argparse.Namespace) -> int:
 
     parallel = args.parallel if args.parallel is not None else job.parallel
 
-    # 4. Compile Remote Script
-    compiled_script, compile_errors = compile_job(job)
-    if compile_errors:
-        for e in compile_errors:
-            print(f"ERROR: {e}", file=sys.stderr)
-        return 1
-
-    # 5. Initialize Parts Directory
+    # 4. Initialize Parts Directory & Get run_id
     parts_dir = get_parts_dir(job.output_csv)
     try:
-        init_parts_dir(
+        run_id = init_parts_dir(
             parts_dir=parts_dir,
             job=job,
             total_rows=len(target_rows),
@@ -136,26 +279,63 @@ def run_job(args: argparse.Namespace) -> int:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
-    # Write compiled script into parts folder
-    remote_script_path = parts_dir / "remote.sh"
-    try:
-        with open(remote_script_path, "w", encoding="utf-8") as f:
-            f.write(compiled_script)
-        remote_script_path.chmod(0o755)
-    except Exception as e:
-        print(f"ERROR: Failed to write {remote_script_path}: {e}", file=sys.stderr)
+    # 5. Compile Remote & Collect Scripts
+    compiled_remote, compile_errors = compile_job(job, run_id=run_id)
+    if compile_errors:
+        for e in compile_errors:
+            print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
-    # 6. Confirmation Prompt
+    compiled_collect, collect_errors = compile_collect_script(job)
+    if collect_errors:
+        for e in collect_errors:
+            print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+    remote_script_path = parts_dir / "remote.sh"
+    collect_script_path = parts_dir / "collect.sh"
+    try:
+        with open(remote_script_path, "w", encoding="utf-8") as f:
+            f.write(compiled_remote)
+        remote_script_path.chmod(0o755)
+
+        with open(collect_script_path, "w", encoding="utf-8") as f:
+            f.write(compiled_collect)
+        collect_script_path.chmod(0o755)
+    except Exception as e:
+        print(f"ERROR: Failed to write scripts to {parts_dir}: {e}", file=sys.stderr)
+        return 1
+
+    # 6. Check Collect List for Resume
+    collect_list = CollectList(parts_dir)
+    stored_phase = "invoke"
+    existing_records: dict[int, dict[str, Any]] = {}
+
+    if args.resume:
+        run_info = get_run_info(parts_dir)
+        stored_phase = run_info.get("phase", "invoke")
+        if stored_phase in ("collect", "merged") and not collect_list.path.exists():
+            print(f"ERROR: Cannot resume: {collect_list.path} is missing while run was in phase '{stored_phase}'.", file=sys.stderr)
+            return 1
+        try:
+            existing_records = collect_list.load(target_rows)
+        except Exception as e:
+            print(f"ERROR: Failed to load collect list during resume: {e}", file=sys.stderr)
+            return 1
+
+    # 7. Confirmation Prompt
     print(f"\n==================================================")
-    print(f"yaml_to_bash Run Plan")
-    print(f"  Job file:        {job.yaml_path.name}")
-    print(f"  Target VMs:      {len(target_rows)} (from {job.input.name})")
-    print(f"  Parallel:        {parallel}")
-    print(f"  Dry run:         {args.dry_run}")
-    print(f"  Resume:          {args.resume}")
-    print(f"  Output CSV:      {job.output_csv}")
-    print(f"  Output Log:      {job.output_log}")
+    print(f"yaml_to_bash Run Plan (v2 Fire-and-Forget)")
+    print(f"  Job file:               {job.yaml_path.name}")
+    print(f"  Target VMs:             {len(target_rows)} (from {job.input.name})")
+    print(f"  Parallel:               {parallel}")
+    print(f"  Dry run:                {args.dry_run}")
+    print(f"  Resume:                 {args.resume} (Phase: {stored_phase})")
+    print(f"  Sleep before collect:   {job.sleep_before_collect}s")
+    print(f"  Collect retry interval: {job.collect_retry_interval}s")
+    print(f"  Collect retries:        {job.collect_retries}")
+    print(f"  Output CSV:             {job.output_csv}")
+    print(f"  Output Log:             {job.output_log}")
     print(f"==================================================\n")
 
     if not args.yes and sys.stdin.isatty():
@@ -168,7 +348,7 @@ def run_job(args: argparse.Namespace) -> int:
             print("\nRun cancelled.")
             return 0
 
-    # 7. Setup Execution State & Signal Handlers
+    # 8. Setup Signal Handlers & Shared State
     run_state = RunState(total_vms=len(target_rows), start_time=time.time())
     circuit_breaker = AuthCircuitBreaker(threshold=5)
     precheck_engine = PrecheckEngine()
@@ -181,6 +361,7 @@ def run_job(args: argparse.Namespace) -> int:
         ctrl_c_count += 1
         if ctrl_c_count == 1:
             print("\n[!] Ctrl-C detected. Stopping submission of new VMs and waiting for active tasks to finish...", file=sys.stderr)
+            print("[!] Note: Already-fired scripts keep running on the VMs.", file=sys.stderr)
             print("[!] Press Ctrl-C again to abort immediately.", file=sys.stderr)
             run_state.stop_requested = True
             interrupted_event.set()
@@ -190,162 +371,229 @@ def run_job(args: argparse.Namespace) -> int:
 
     original_sigint = signal.signal(signal.SIGINT, sigint_handler)
 
-    # 8. Worker Function
     active_workers_count = 0
     workers_lock = threading.Lock()
 
-    def process_vm(row: VMRow) -> None:
-        nonlocal active_workers_count
+    # ==============================================================================
+    # 9. Phase 1 — Invoke
+    # ==============================================================================
+    try:
+        # Determine VMs for phase 1: VMs with no finished part file AND not in collect list (§3.7)
+        phase1_rows: list[VMRow] = []
+        for r in target_rows:
+            if args.resume and is_part_finished(parts_dir, r, len(target_rows)):
+                run_state.update("OK")
+                continue
+            if r.index in existing_records:
+                # Already fired or attempted in previous run
+                continue
+            phase1_rows.append(r)
 
-        if run_state.stop_requested:
-            return
+        if phase1_rows:
+            update_run_phase(parts_dir, "invoke")
 
-        # Skip if already finished (when resuming)
-        if args.resume and is_part_finished(parts_dir, row, len(target_rows)):
-            run_state.update("OK")
-            return
+            def invoke_worker(row: VMRow) -> None:
+                nonlocal active_workers_count
+                if run_state.stop_requested:
+                    return
 
-        with workers_lock:
-            active_workers_count += 1
+                with workers_lock:
+                    active_workers_count += 1
 
-        logger = VMLogger(row.vm_name, row.index)
-        outcome_marker: str | None = None
-        remote_res = None
+                logger = VMLogger(row.vm_name, row.index)
 
-        try:
-            # Phase 1: Precheck
-            proceed, precheck_marker = precheck_engine.run_prechecks_for_vm(job, row, logger)
-            if not proceed:
-                outcome_marker = precheck_marker
-            else:
-                # Phase 2: Dispatch
-                if args.dry_run:
-                    logger.log("[dry-run] Prechecks passed; skipping run-command execution.")
-                    outcome_marker = "DRY_RUN:ok"
-                else:
-                    remote_res = dispatch_vm(
-                        job=job,
+                try:
+                    # 1. Precheck
+                    proceed, precheck_marker = precheck_engine.run_prechecks_for_vm(job, row, logger)
+                    if not proceed:
+                        row_vals = collect_for_vm(job, row, outcome_marker=precheck_marker, logger=logger)
+                        logger.finalize(precheck_marker or "SKIPPED")
+                        write_part_files(parts_dir, row, len(target_rows), row_vals, logger)
+                        outcome_type = "SKIPPED" if "SKIPPED:" in (precheck_marker or "") else "ENDED"
+                        run_state.update(outcome_type)
+                        return
+
+                    # 2. Dry run
+                    if args.dry_run:
+                        logger.log("[dry-run] Prechecks passed; skipping run-command execution.")
+                        row_vals = collect_for_vm(job, row, outcome_marker="DRY_RUN:ok", logger=logger)
+                        logger.finalize("DRY_RUN:ok")
+                        write_part_files(parts_dir, row, len(target_rows), row_vals, logger)
+                        run_state.update("OK")
+                        return
+
+                    # 3. Fire script (--no-wait)
+                    # Append record BEFORE az call (R3 / §3.2)
+                    invoked_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    rec = {
+                        "index": row.index,
+                        "vm_name": row.vm_name,
+                        "subscription": row.subscription,
+                        "resource_group": row.resource_group,
+                        "invoked_at": invoked_at,
+                        "confirmed": False,
+                        "attempts": 1,
+                        "log": list(logger.lines),
+                    }
+                    collect_list.append(rec)
+
+                    invoke_res = invoke_nowait(
                         row=row,
                         remote_script_path=remote_script_path,
                         logger=logger,
                         circuit_breaker=circuit_breaker,
                     )
-                    if remote_res.error:
-                        outcome_marker = remote_res.error
 
-            # Phase 3: Collect
-            row_values = collect_for_vm(
-                job=job,
-                row=row,
-                remote_result=remote_res,
-                outcome_marker=outcome_marker,
-                logger=logger,
-            )
+                    if invoke_res.success:
+                        rec["confirmed"] = True
+                        rec["attempts"] = invoke_res.attempts
+                        rec["log"] = list(logger.lines)
+                        collect_list.append(rec)
+                    else:
+                        rec["confirmed"] = False
+                        rec["failed"] = True
+                        rec["attempts"] = invoke_res.attempts
+                        rec["log"] = list(logger.lines)
+                        collect_list.append(rec)
 
-            # Determine outcome type for progress reporting
-            row_str = " ".join(row_values)
-            if "ERROR:" in row_str:
-                outcome_type = "ERROR"
-            elif "SKIPPED:" in row_str:
-                outcome_type = "SKIPPED"
-            elif "ENDED:" in row_str:
-                outcome_type = "ENDED"
-            else:
-                outcome_type = "OK"
+                        # Write part file now with error marker
+                        marker = invoke_res.error or "ERROR:unknown"
+                        row_vals = collect_for_vm(job, row, outcome_marker=marker, logger=logger)
+                        logger.finalize(marker)
+                        write_part_files(parts_dir, row, len(target_rows), row_vals, logger)
+                        run_state.update("ERROR")
 
-            logger.finalize(outcome_marker or outcome_type)
+                except AuthAbortedError as e:
+                    logger.log_error(str(e))
+                    logger.finalize("ERROR:auth")
+                    write_part_files(
+                        parts_dir=parts_dir,
+                        row=row,
+                        total_rows=len(target_rows),
+                        row_values=collect_for_vm(job, row, outcome_marker="ERROR:auth", logger=logger),
+                        logger=logger,
+                    )
+                    run_state.update("ERROR")
+                    run_state.stop_requested = True
+                    interrupted_event.set()
 
-            # Phase 4: Write part files
-            write_part_files(
-                parts_dir=parts_dir,
-                row=row,
-                total_rows=len(target_rows),
-                row_values=row_values,
-                logger=logger,
-            )
+                except Exception as e:
+                    err_type = type(e).__name__
+                    tb = traceback.format_exc()
+                    logger.log_error(f"Uncaught exception in invoke phase: {e}\n{tb}")
+                    marker = f"ERROR:internal:{err_type}"
+                    logger.finalize(marker)
+                    write_part_files(
+                        parts_dir=parts_dir,
+                        row=row,
+                        total_rows=len(target_rows),
+                        row_values=collect_for_vm(job, row, outcome_marker=marker, logger=logger),
+                        logger=logger,
+                    )
+                    run_state.update("ERROR")
 
-            run_state.update(outcome_type)
+                finally:
+                    with workers_lock:
+                        active_workers_count -= 1
+                    sys.stderr.write("\r" + run_state.format_progress("Phase 1: Invoke", active_workers_count) + "   ")
+                    sys.stderr.flush()
 
-        except AuthAbortedError as e:
-            logger.log_error(str(e))
-            logger.finalize("ERROR:auth")
-            write_part_files(
-                parts_dir=parts_dir,
-                row=row,
-                total_rows=len(target_rows),
-                row_values=collect_for_vm(job, row, outcome_marker="ERROR:auth", logger=logger),
-                logger=logger,
-            )
-            run_state.update("ERROR")
-            run_state.stop_requested = True
-            interrupted_event.set()
+            if phase1_rows:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as executor:
+                    futures = [executor.submit(invoke_worker, r) for r in phase1_rows]
+                    for f in concurrent.futures.as_completed(futures):
+                        if run_state.stop_requested:
+                            break
 
-        except Exception as e:
-            err_type = type(e).__name__
-            tb = traceback.format_exc()
-            logger.log_error(f"Uncaught exception: {e}\n{tb}")
-            marker = f"ERROR:internal:{err_type}"
-            logger.finalize(marker)
-            write_part_files(
-                parts_dir=parts_dir,
-                row=row,
-                total_rows=len(target_rows),
-                row_values=collect_for_vm(job, row, outcome_marker=marker, logger=logger),
-                logger=logger,
-            )
-            run_state.update("ERROR")
+            sys.stderr.write("\n")
 
-        finally:
-            with workers_lock:
-                active_workers_count -= 1
-            # Print progress update
-            sys.stderr.write("\r" + run_state.format_progress(active_workers_count) + "   ")
-            sys.stderr.flush()
+        # Check circuit breaker & Ctrl-C after Phase 1
+        if circuit_breaker.is_tripped:
+            print("\nFATAL: Run aborted due to 5 consecutive Azure authentication failures in Phase 1.", file=sys.stderr)
+            print(f"Part files preserved in: {parts_dir}", file=sys.stderr)
+            print(f"Rerun with: y2b run {job.yaml_path} --resume", file=sys.stderr)
+            return 3
 
-    # 9. Execute Pool
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as executor:
-            futures = []
-            for row in target_rows:
-                if run_state.stop_requested:
-                    break
-                futures.append(executor.submit(process_vm, row))
+        if ctrl_c_count > 0 or run_state.stop_requested:
+            print(f"\nRun interrupted by user. Note: already-fired scripts keep running on the VMs.", file=sys.stderr)
+            print(f"Part files preserved in: {parts_dir}", file=sys.stderr)
+            print(f"Rerun with: y2b run {job.yaml_path} --resume", file=sys.stderr)
+            return 3
 
-            for f in concurrent.futures.as_completed(futures):
-                if run_state.stop_requested:
-                    break
+        # ==============================================================================
+        # 10. Phase 2 — Collect (R2, R3, R4)
+        # ==============================================================================
+        if not args.dry_run:
+            update_run_phase(parts_dir, "collect")
+
+            # Phase 2 work set = VMs that have a record in collect list AND no finished part file
+            all_collect_records = collect_list.load(target_rows)
+            row_by_index = {r.index: r for r in target_rows}
+
+            work_set: list[tuple[VMRow, dict[str, Any]]] = []
+            for idx, rec in all_collect_records.items():
+                if idx in row_by_index:
+                    r = row_by_index[idx]
+                    if not is_part_finished(parts_dir, r, len(target_rows)):
+                        work_set.append((r, rec))
+
+            if work_set:
+                run_collect_phase(
+                    job=job,
+                    work_set=work_set,
+                    parts_dir=parts_dir,
+                    collect_script_path=collect_script_path,
+                    run_id=run_id,
+                    total_rows=len(target_rows),
+                    parallel=parallel,
+                    circuit_breaker=circuit_breaker,
+                    run_state=run_state,
+                    interrupted_event=interrupted_event,
+                )
+
+        # Check circuit breaker & Ctrl-C after Phase 2
+        if circuit_breaker.is_tripped:
+            print("\nFATAL: Run aborted due to 5 consecutive Azure authentication failures in Phase 2.", file=sys.stderr)
+            print(f"Part files preserved in: {parts_dir}", file=sys.stderr)
+            print(f"Rerun with: y2b run {job.yaml_path} --resume", file=sys.stderr)
+            return 3
+
+        if ctrl_c_count > 0 or run_state.stop_requested:
+            print(f"\nRun interrupted by user. Note: already-fired scripts keep running on the VMs.", file=sys.stderr)
+            print(f"Part files preserved in: {parts_dir}", file=sys.stderr)
+            print(f"Rerun with: y2b run {job.yaml_path} --resume", file=sys.stderr)
+            return 3
+
     finally:
         signal.signal(signal.SIGINT, original_sigint)
 
-    sys.stderr.write("\n")
+    # ==============================================================================
+    # 11. Merge Part Files (Collect Later / Still Running handling)
+    # ==============================================================================
+    has_still_running = any(
+        is_part_still_running(parts_dir, r, len(target_rows))
+        for r in target_rows
+    )
 
-    # 10. Check if interrupted or auth circuit breaker tripped
-    if circuit_breaker.is_tripped:
-        print("\nFATAL: Run aborted due to 5 consecutive Azure authentication failures.", file=sys.stderr)
-        print(f"Part files preserved in: {parts_dir}", file=sys.stderr)
-        print(f"Rerun with: y2b run {job.yaml_path} --resume", file=sys.stderr)
-        return 3
+    keep_parts = args.keep_parts or has_still_running
 
-    if ctrl_c_count > 0:
-        print(f"\nRun interrupted by user. Part files preserved in: {parts_dir}", file=sys.stderr)
-        print(f"Rerun with: y2b run {job.yaml_path} --resume", file=sys.stderr)
-        return 3
-
-    # 11. Merge Part Files
     print("Merging VM part files...")
     try:
         counts = merge_parts(
             job=job,
             all_rows=target_rows,
             parts_dir=parts_dir,
-            keep_parts=args.keep_parts,
+            keep_parts=keep_parts,
         )
     except MergeError as me:
         print(f"\nFATAL: {me}", file=sys.stderr)
         return 3
 
+    if parts_dir.exists():
+        update_run_phase(parts_dir, "merged")
+
     print("\n==================================================")
-    print("Run Completed Successfully")
+    print("Run Completed")
     print(f"  Total VMs:   {len(target_rows)}")
     print(f"  OK:          {counts.get('OK', 0)}")
     print(f"  Skipped:     {counts.get('SKIPPED', 0)}")
@@ -353,13 +601,15 @@ def run_job(args: argparse.Namespace) -> int:
     print(f"  Error:       {counts.get('ERROR', 0)}")
     print(f"  Output CSV:  {job.output_csv}")
     print(f"  Output Log:  {job.output_log}")
+
+    if has_still_running:
+        print(f"\n[!] Notice: Some VMs were still running remotely when collection timed out.")
+        print(f"    Part files preserved in: {parts_dir}")
+        print(f"    Rerun later to read remaining VMs: y2b run {job.yaml_path} --resume")
+
     print("==================================================")
 
-    # Exit code determination:
-    # 0 if all VMs OK
-    # 2 if completed but some VMs SKIPPED, ENDED, or ERROR
     if counts.get("SKIPPED", 0) > 0 or counts.get("ENDED", 0) > 0 or counts.get("ERROR", 0) > 0:
         return 2
 
     return 0
-

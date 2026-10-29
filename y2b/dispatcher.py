@@ -18,6 +18,9 @@ from y2b.config import Job
 from y2b.inputcsv import VMRow
 from y2b.vmlog import VMLogger
 
+INVOKE_CALL_TIMEOUT = 300
+READER_CALL_TIMEOUT = 300
+
 
 class AuthCircuitBreaker:
     """Tracks consecutive auth errors across all worker threads."""
@@ -46,12 +49,26 @@ class AuthAbortedError(Exception):
 
 
 @dataclass
-class RemoteResult:
-    vars: dict[str, str] = field(default_factory=dict)
-    raw_message: str = ""
+class InvokeResult:
+    success: bool
+    error: str | None = None
     attempts: int = 1
     duration_s: float = 0.0
+    raw_message: str = ""
+
+
+@dataclass
+class ReadResult:
+    status: str = "OK"  # "OK", "STILL_RUNNING", "ERROR"
+    vars: dict[str, str] = field(default_factory=dict)
     error: str | None = None
+    attempts: int = 1
+    duration_s: float = 0.0
+    raw_message: str = ""
+
+
+# Backward-compatible alias
+RemoteResult = ReadResult
 
 
 # Error classification patterns
@@ -161,6 +178,294 @@ def parse_run_command_output(
     return parsed_vars, None, message
 
 
+def _az_run_command(
+    cmd: list[str],
+    timeout: int,
+    busy_policy: str,  # "retry" or "return_busy"
+    logger: VMLogger,
+    circuit_breaker: AuthCircuitBreaker | None = None,
+    delay_multiplier: float = 1.0,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> tuple[str, int | None, str, str, int, float]:
+    """
+    Execute an Azure CLI command with standard retry and backoff loop.
+    Returns:
+        (status_or_marker, returncode, stdout, stderr, total_attempts, duration_s)
+    """
+    if circuit_breaker and circuit_breaker.is_tripped:
+        raise AuthAbortedError("Run aborted: 5 consecutive Azure authentication failures")
+
+    az_env = os.environ.copy()
+    az_env["AZURE_CORE_COLLECT_TELEMETRY"] = "no"
+    az_env["AZURE_CORE_NO_COLOR"] = "1"
+    az_env["AZURE_CORE_ONLY_SHOW_ERRORS"] = "1"
+
+    throttled_backoffs = [15, 30, 60, 120, 240]
+    throttled_attempt = 0
+    busy_attempt = 0
+    unknown_attempt = 0
+    total_attempts = 0
+
+    start_time = time.time()
+
+    while True:
+        total_attempts += 1
+        logger.log_dispatch(f"Executing az command (attempt {total_attempts}): {' '.join(cmd[:6])}...")
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                env=az_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as e:
+            duration = time.time() - start_time
+            logger.log_error(f"az command timed out after {timeout}s.")
+            return "ERROR:run_command_timeout", None, "", (e.stderr or ""), total_attempts, duration
+        except Exception as e:
+            duration = time.time() - start_time
+            logger.log_error(f"Failed to launch az CLI process: {e}")
+            return f"ERROR:internal:{type(e).__name__}", None, "", str(e), total_attempts, duration
+
+        duration = time.time() - start_time
+
+        if proc.returncode == 0:
+            if circuit_breaker:
+                circuit_breaker.record_success()
+            return "SUCCESS", 0, proc.stdout, proc.stderr, total_attempts, duration
+
+        # Non-zero return code: classify error
+        err_class = classify_error(proc.stderr, proc.returncode)
+        first_stderr_line = (proc.stderr.strip().splitlines() or ["unknown"])[0][:80]
+        logger.log_dispatch(f"Command failed (rc={proc.returncode}, class={err_class}): {first_stderr_line}")
+
+        if err_class == "auth":
+            if circuit_breaker:
+                circuit_breaker.record_auth_error()
+                if circuit_breaker.is_tripped:
+                    raise AuthAbortedError("Run aborted: 5 consecutive Azure authentication failures")
+            return "ERROR:auth", proc.returncode, proc.stdout, proc.stderr, total_attempts, duration
+
+        elif err_class == "agent":
+            return "ERROR:vm_agent_unavailable", proc.returncode, proc.stdout, proc.stderr, total_attempts, duration
+
+        elif err_class == "missing":
+            return "ERROR:vm_not_found", proc.returncode, proc.stdout, proc.stderr, total_attempts, duration
+
+        elif err_class == "throttled":
+            if throttled_attempt < len(throttled_backoffs):
+                base_delay = throttled_backoffs[throttled_attempt]
+                jitter = random.uniform(0.8, 1.2)
+                wait_sec = base_delay * jitter * delay_multiplier
+                logger.log_dispatch(f"Throttled by Azure. Backing off for {wait_sec:.1f}s (retry {throttled_attempt + 1}/{len(throttled_backoffs)})...")
+                throttled_attempt += 1
+                sleep_fn(wait_sec)
+                continue
+            else:
+                return "ERROR:throttled", proc.returncode, proc.stdout, proc.stderr, total_attempts, duration
+
+        elif err_class == "busy":
+            if busy_policy == "return_busy":
+                logger.log_dispatch("VM run-command busy (conflict); returning STILL_RUNNING.")
+                return "STILL_RUNNING", proc.returncode, proc.stdout, proc.stderr, total_attempts, duration
+            else:
+                if busy_attempt < 3:
+                    wait_sec = 60 * delay_multiplier
+                    logger.log_dispatch(f"VM run-command busy (conflict). Waiting {wait_sec:.1f}s (retry {busy_attempt + 1}/3)...")
+                    busy_attempt += 1
+                    sleep_fn(wait_sec)
+                    continue
+                else:
+                    return "ERROR:run_command_busy", proc.returncode, proc.stdout, proc.stderr, total_attempts, duration
+
+        else:
+            # Unknown error: retry once after 30s
+            if unknown_attempt < 1:
+                wait_sec = 30 * delay_multiplier
+                logger.log_dispatch(f"Unknown Azure error. Retrying once after {wait_sec:.1f}s...")
+                unknown_attempt += 1
+                sleep_fn(wait_sec)
+                continue
+            else:
+                return f"ERROR:az:{first_stderr_line}", proc.returncode, proc.stdout, proc.stderr, total_attempts, duration
+
+
+def invoke_nowait(
+    row: VMRow,
+    remote_script_path: Path,
+    logger: VMLogger,
+    circuit_breaker: AuthCircuitBreaker | None = None,
+    delay_multiplier: float = 1.0,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    timeout: int = INVOKE_CALL_TIMEOUT,
+) -> InvokeResult:
+    """
+    Fire the compiled script on the VM with --no-wait.
+    Returns:
+        InvokeResult(success=True) on rc 0, or InvokeResult(success=False, error=marker).
+    """
+    cmd = [
+        "az",
+        "vm",
+        "run-command",
+        "invoke",
+        "--subscription",
+        row.subscription,
+        "-g",
+        row.resource_group,
+        "-n",
+        row.vm_name,
+        "--command-id",
+        "RunShellScript",
+        "--scripts",
+        f"@{remote_script_path}",
+        "--no-wait",
+    ]
+
+    status, rc, stdout, stderr, attempts, duration = _az_run_command(
+        cmd=cmd,
+        timeout=timeout,
+        busy_policy="retry",
+        logger=logger,
+        circuit_breaker=circuit_breaker,
+        delay_multiplier=delay_multiplier,
+        sleep_fn=sleep_fn,
+    )
+
+    if status == "SUCCESS":
+        logger.log_dispatch(f"invoke --no-wait accepted in {duration:.1f}s.")
+        return InvokeResult(
+            success=True,
+            error=None,
+            attempts=attempts,
+            duration_s=duration,
+            raw_message=stdout,
+        )
+    else:
+        return InvokeResult(
+            success=False,
+            error=status,
+            attempts=attempts,
+            duration_s=duration,
+            raw_message=stderr,
+        )
+
+
+def read_results(
+    row: VMRow,
+    collect_script_path: Path,
+    run_id: str,
+    logger: VMLogger,
+    circuit_breaker: AuthCircuitBreaker | None = None,
+    delay_multiplier: float = 1.0,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    timeout: int = READER_CALL_TIMEOUT,
+) -> ReadResult:
+    """
+    Read results from VM by executing collect.sh synchronously.
+    Handles STILL_RUNNING on busy conflict, checks RUN_ID and DONE markers.
+    """
+    cmd = [
+        "az",
+        "vm",
+        "run-command",
+        "invoke",
+        "--subscription",
+        row.subscription,
+        "-g",
+        row.resource_group,
+        "-n",
+        row.vm_name,
+        "--command-id",
+        "RunShellScript",
+        "--scripts",
+        f"@{collect_script_path}",
+        "-o",
+        "json",
+    ]
+
+    status, rc, stdout, stderr, attempts, duration = _az_run_command(
+        cmd=cmd,
+        timeout=timeout,
+        busy_policy="return_busy",
+        logger=logger,
+        circuit_breaker=circuit_breaker,
+        delay_multiplier=delay_multiplier,
+        sleep_fn=sleep_fn,
+    )
+
+    if status == "STILL_RUNNING":
+        return ReadResult(
+            status="STILL_RUNNING",
+            attempts=attempts,
+            duration_s=duration,
+            raw_message=stderr,
+        )
+
+    if status != "SUCCESS":
+        return ReadResult(
+            status="ERROR",
+            error=status,
+            attempts=attempts,
+            duration_s=duration,
+            raw_message=stderr,
+        )
+
+    parsed_vars, err_marker, raw_msg = parse_run_command_output(stdout, logger=logger)
+    if err_marker:
+        return ReadResult(
+            status="ERROR",
+            error=err_marker,
+            attempts=attempts,
+            duration_s=duration,
+            raw_message=raw_msg,
+        )
+
+    if "__Y2B_RUN__" not in parsed_vars:
+        logger.log_error("No __Y2B_RUN__ marker in res_file (script never started)")
+        return ReadResult(
+            status="ERROR",
+            error="ERROR:not_started",
+            attempts=attempts,
+            duration_s=duration,
+            raw_message=raw_msg,
+        )
+
+    res_run_id = parsed_vars.get("__Y2B_RUN__")
+    if res_run_id != run_id:
+        logger.log_error(f"Stale result: res_file __Y2B_RUN__ is '{res_run_id}', expected current run_id '{run_id}'")
+        return ReadResult(
+            status="ERROR",
+            error="ERROR:stale_result",
+            attempts=attempts,
+            duration_s=duration,
+            raw_message=raw_msg,
+        )
+
+    if "__Y2B_DONE__" not in parsed_vars or parsed_vars.get("__Y2B_DONE__") != run_id:
+        logger.log_error(f"Incomplete remote execution: __Y2B_RUN__ present for '{run_id}', but no valid __Y2B_DONE__ marker")
+        return ReadResult(
+            status="ERROR",
+            error="ERROR:remote_incomplete",
+            attempts=attempts,
+            duration_s=duration,
+            raw_message=raw_msg,
+        )
+
+    # Valid run and done markers match run_id
+    logger.log_dispatch(f"Reader finished in {duration:.1f}s with {len(parsed_vars)} variables.")
+    return ReadResult(
+        status="OK",
+        vars=parsed_vars,
+        attempts=attempts,
+        duration_s=duration,
+        raw_message=raw_msg,
+    )
+
+
 def dispatch_vm(
     job: Job,
     row: VMRow,
@@ -169,14 +474,8 @@ def dispatch_vm(
     circuit_breaker: AuthCircuitBreaker | None = None,
     delay_multiplier: float = 1.0,
     sleep_fn: Callable[[float], None] = time.sleep,
-) -> RemoteResult:
-    """
-    Invoke remote script on VM using Azure CLI Run-Command with full error handling and retries.
-    """
-    if circuit_breaker and circuit_breaker.is_tripped:
-        raise AuthAbortedError("Run aborted: 5 consecutive Azure authentication failures")
-
-    # az vm run-command invoke command
+) -> ReadResult:
+    """Synchronous dispatch function (legacy wrapper)."""
     cmd = [
         "az",
         "vm",
@@ -195,145 +494,29 @@ def dispatch_vm(
         "-o",
         "json",
     ]
-
-    # Required Azure CLI environment
-    az_env = os.environ.copy()
-    az_env["AZURE_CORE_COLLECT_TELEMETRY"] = "no"
-    az_env["AZURE_CORE_NO_COLOR"] = "1"
-    az_env["AZURE_CORE_ONLY_SHOW_ERRORS"] = "1"
-
-    throttled_backoffs = [15, 30, 60, 120, 240]
-    throttled_attempt = 0
-    busy_attempt = 0
-    unknown_attempt = 0
-    total_attempts = 0
-
-    start_time = time.time()
-
-    while True:
-        total_attempts += 1
-        logger.log_dispatch(f"Executing az vm run-command invoke (attempt {total_attempts})...")
-
-        try:
-            proc = subprocess.run(
-                cmd,
-                env=az_env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=job.run_timeout,
-            )
-        except subprocess.TimeoutExpired as e:
-            duration = time.time() - start_time
-            logger.log_error(f"az vm run-command timed out after {job.run_timeout}s. Note: remote command may still be running on the VM!")
-            return RemoteResult(
-                error="ERROR:run_command_timeout",
-                attempts=total_attempts,
-                duration_s=duration,
-            )
-        except Exception as e:
-            duration = time.time() - start_time
-            logger.log_error(f"Failed to launch az CLI process: {e}")
-            return RemoteResult(
-                error=f"ERROR:internal:{type(e).__name__}",
-                attempts=total_attempts,
-                duration_s=duration,
-            )
-
-        duration = time.time() - start_time
-
-        # Check returncode
-        if proc.returncode == 0:
-            if circuit_breaker:
-                circuit_breaker.record_success()
-
-            parsed_vars, err_marker, raw_msg = parse_run_command_output(proc.stdout, logger=logger)
-            logger.log_dispatch(f"Run-command finished in {duration:.1f}s with {len(parsed_vars)} variables.")
-            return RemoteResult(
-                vars=parsed_vars,
-                raw_message=raw_msg,
-                attempts=total_attempts,
-                duration_s=duration,
-                error=err_marker,
-            )
-
-        # Non-zero return code: classify error
-        err_class = classify_error(proc.stderr, proc.returncode)
-        first_stderr_line = (proc.stderr.strip().splitlines() or ["unknown"])[0][:80]
-        logger.log_dispatch(f"Command failed (rc={proc.returncode}, class={err_class}): {first_stderr_line}")
-
-        if err_class == "auth":
-            if circuit_breaker:
-                circuit_breaker.record_auth_error()
-                if circuit_breaker.is_tripped:
-                    raise AuthAbortedError("Run aborted: 5 consecutive Azure authentication failures")
-            return RemoteResult(
-                error="ERROR:auth",
-                raw_message=proc.stderr,
-                attempts=total_attempts,
-                duration_s=duration,
-            )
-
-        elif err_class == "agent":
-            return RemoteResult(
-                error="ERROR:vm_agent_unavailable",
-                raw_message=proc.stderr,
-                attempts=total_attempts,
-                duration_s=duration,
-            )
-
-        elif err_class == "missing":
-            return RemoteResult(
-                error="ERROR:vm_not_found",
-                raw_message=proc.stderr,
-                attempts=total_attempts,
-                duration_s=duration,
-            )
-
-        elif err_class == "throttled":
-            if throttled_attempt < len(throttled_backoffs):
-                base_delay = throttled_backoffs[throttled_attempt]
-                jitter = random.uniform(0.8, 1.2)
-                wait_sec = base_delay * jitter * delay_multiplier
-                logger.log_dispatch(f"Throttled by Azure. Backing off for {wait_sec:.1f}s (retry {throttled_attempt + 1}/{len(throttled_backoffs)})...")
-                throttled_attempt += 1
-                sleep_fn(wait_sec)
-                continue
-            else:
-                return RemoteResult(
-                    error="ERROR:throttled",
-                    raw_message=proc.stderr,
-                    attempts=total_attempts,
-                    duration_s=duration,
-                )
-
-        elif err_class == "busy":
-            if busy_attempt < 3:
-                wait_sec = 60 * delay_multiplier
-                logger.log_dispatch(f"VM run-command busy (conflict). Waiting {wait_sec:.1f}s (retry {busy_attempt + 1}/3)...")
-                busy_attempt += 1
-                sleep_fn(wait_sec)
-                continue
-            else:
-                return RemoteResult(
-                    error="ERROR:run_command_busy",
-                    raw_message=proc.stderr,
-                    attempts=total_attempts,
-                    duration_s=duration,
-                )
-
-        else:
-            # Unknown error: retry once after 30s
-            if unknown_attempt < 1:
-                wait_sec = 30 * delay_multiplier
-                logger.log_dispatch(f"Unknown Azure error. Retrying once after {wait_sec:.1f}s...")
-                unknown_attempt += 1
-                sleep_fn(wait_sec)
-                continue
-            else:
-                return RemoteResult(
-                    error=f"ERROR:az:{first_stderr_line}",
-                    raw_message=proc.stderr,
-                    attempts=total_attempts,
-                    duration_s=duration,
-                )
+    status, rc, stdout, stderr, attempts, duration = _az_run_command(
+        cmd=cmd,
+        timeout=job.run_timeout,
+        busy_policy="retry",
+        logger=logger,
+        circuit_breaker=circuit_breaker,
+        delay_multiplier=delay_multiplier,
+        sleep_fn=sleep_fn,
+    )
+    if status == "SUCCESS":
+        parsed_vars, err_marker, raw_msg = parse_run_command_output(stdout, logger=logger)
+        return ReadResult(
+            status="OK" if not err_marker else "ERROR",
+            vars=parsed_vars,
+            error=err_marker,
+            attempts=attempts,
+            duration_s=duration,
+            raw_message=raw_msg,
+        )
+    return ReadResult(
+        status="ERROR",
+        error=status,
+        attempts=attempts,
+        duration_s=duration,
+        raw_message=stderr,
+    )

@@ -7,6 +7,11 @@ output_csv: "./result.csv"         # Path to the final aggregated CSV report
 actions: "skip"                    # Power state policy: "skip" | "start" (if VM stopped)
 parallel: 10                       # Number of concurrent VM jobs running at once
 
+# Collect timing (fire and forget)
+sleep_before_collect: "5m"         # REQUIRED. Wait between a VM's invoke and its first collect attempt
+collect_retry_interval: "30s"      # optional, default "30s". Wait before re-reading a VM that is still busy
+collect_retries: 3                 # optional, default 3. Re-reads after the first attempt
+
 # ==============================================================================
 # Pipeline 1: Invoke (Host Precheck + Remote Run Command)
 # ==============================================================================
@@ -48,20 +53,17 @@ invoke:
     log_file: "/var/tmp/runcommand/result.log"
     steps:
       - name: "check-hip-version"
-        var: "HIP_VERSION"
         script: |
           # Query package or version
           VERSION=$(rpm -q --queryformat '%{VERSION}' hip 2>/dev/null || echo "NOT_INSTALLED")
-          write_result "$VERSION"
+          write_result HIP_VERSION "$VERSION"
 
       - name: "check-kernel-count"
-        var: "KERNEL_COUNT"
         script: |
           COUNT=$(dnf repoquery --installed kernel 2>/dev/null | wc -l)
-          write_result "$COUNT"
+          write_result KERNEL_COUNT "$COUNT"
 
       - name: "complex-hardware-audit"
-        var: "HW_AUDIT_STATUS"
         script_path: "./scripts/audit_hardware.sh"   # Path to external bash script
 
 # ==============================================================================

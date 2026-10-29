@@ -41,6 +41,7 @@ output_log: "./result.log"
 output_csv: "./result.csv"
 actions: "skip"
 parallel: 10
+sleep_before_collect: 0
 invoke:
   precheck:
     - name: "check-vm-running"
@@ -54,11 +55,9 @@ invoke:
     log_file: "/var/tmp/result.log"
     steps:
       - name: "get-hip"
-        var: "HIP_VERSION"
-        script: "write_result '22102026'"
+        script: "write_result HIP_VERSION '22102026'"
       - name: "get-kernel"
-        var: "KERNEL_COUNT"
-        script: "write_result '3'"
+        script: "write_result KERNEL_COUNT '3'"
 collect:
   - column: "vm_name"
     source: "input.vm_name"

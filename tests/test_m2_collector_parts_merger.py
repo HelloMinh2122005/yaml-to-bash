@@ -73,14 +73,14 @@ output_log: "./result.log"
 output_csv: "./result.csv"
 actions: "skip"
 parallel: 1
+sleep_before_collect: 0
 invoke:
   runcommand:
     res_file: "/var/tmp/result.res"
     log_file: "/var/tmp/result.log"
     steps:
       - name: "step1"
-        var: "RAW_VAR"
-        script: "write_result test"
+        script: "write_result RAW_VAR test"
 collect:
   - column: "vm_name"
     source: "input.vm_name"

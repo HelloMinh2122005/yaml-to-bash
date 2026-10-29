@@ -150,11 +150,10 @@ actions: "skip"
 # Concurrency: Number of concurrent VM workers (1 to 100)
 parallel: 10
 
-# Optional delay (seconds) before host collection runs (default 0)
-sleep_before_collect: 0
-
-# Maximum duration (seconds) allowed for a single run-command invoke (default 1800)
-run_timeout: 1800
+# Collect timing (fire and forget)
+sleep_before_collect: "5m"         # REQUIRED. Delay between a VM's invoke and first collect attempt
+collect_retry_interval: "30s"      # Optional (default "30s"). Wait before re-reading still-busy VM
+collect_retries: 3                 # Optional (default 3). Re-reads after first attempt
 ```
 
 ---
@@ -221,33 +220,38 @@ invoke:
     steps:
       # Step 1: Inline script querying a package version
       - name: "check-hip-version"
-        var: "HIP_VERSION"
         timeout: 120               # Step timeout (seconds)
         script: |
           VERSION=$(rpm -q --queryformat '%{VERSION}' hip 2>/dev/null || echo "NOT_INSTALLED")
-          write_result "$VERSION"
+          write_result HIP_VERSION "$VERSION"
 
       # Step 2: Inline script counting installed kernels
       - name: "check-kernel-count"
-        var: "KERNEL_COUNT"
         timeout: 120
         script: |
           COUNT=$(dnf repoquery --installed kernel 2>/dev/null | wc -l)
-          write_result "$COUNT"
+          write_result KERNEL_COUNT "$COUNT"
 
       # Step 3: External script file
       - name: "complex-hardware-audit"
-        var: "HW_AUDIT_STATUS"
         timeout: 300
         script_path: "./scripts/audit_hardware.sh"
 ```
 
-#### The `write_result` Helper Contract
-Every step must call `write_result "<value>"`.
-- The engine injects `write_result` automatically into the remote execution environment.
+#### The `write_result NAME VALUE` Helper Contract
+Steps no longer declare `var:`. The step script explicitly names its result variables using:
+```bash
+write_result NAME VALUE
+```
+- A single step can call `write_result` multiple times to record multiple values.
+- `NAME` must match `^[A-Z_][A-Z0-9_]*$` and cannot begin with `__Y2B_` (reserved).
 - Values are base64-encoded into `$RES_FILE` to guarantee that characters like `"`, `$`, `` ` ``, and newlines cannot corrupt parsing.
 - Human-readable logs are simultaneously appended to `$LOG_FILE`.
-- If a step times out or crashes (`exit 1`), subsequent steps **continue to run**, and the failed step is recorded as `__ERROR__ timeout` or `__ERROR__ rc=<exit_code>`.
+- Each step runs in an isolated `bash -c` subshell with timeout protection. Subsequent steps **continue to run**, and each step's completion status is recorded in `$RES_FILE` (`ok`, `rc=<exit_code>`, or `timeout`).
+- When a collect column `var: X` resolves:
+  1. If `X` was written, its value is used (written values always win, even if the step later failed).
+  2. If `X` was not written and the step that statically writes `X` exited non-zero or timed out, the column receives `__ERROR__ <status>` (e.g. `__ERROR__ rc=1` or `__ERROR__ timeout`).
+  3. Otherwise, the column receives `__MISSING__`.
 
 ---
 
@@ -431,6 +435,10 @@ When a VM does not finish with `OK`, non-passthrough columns carry an outcome ma
 |---|---|---|
 | `SKIPPED:<precheck>` | Precheck returned `skip` policy | Inspect VM power state or precheck logic |
 | `ENDED:<precheck>` | Precheck returned `end_check` | Verify tenant/subscription permissions |
+| `ERROR:still_running` | VM was still busy after sleep and collect retries | Parts folder kept; rerun later with `y2b run <job> --resume` |
+| `ERROR:remote_incomplete` | Remote script started but did not finish writing done marker | Script killed, VM rebooted, or exceeded Azure 90m cap |
+| `ERROR:stale_result` | `$RES_FILE` on VM belongs to a different run | Stale result ignored |
+| `ERROR:not_started` | `$RES_FILE` is missing or empty; script never executed | Check Azure agent and run-command status |
 | `ERROR:throttled` | Persistent ARM rate limiting (429) | Lower `--parallel` concurrency (e.g. from 20 to 10) |
 | `ERROR:run_command_busy` | Another Run-Command is already running on VM | Wait a minute and rerun with `--resume` |
 | `ERROR:vm_agent_unavailable` | Azure Linux Guest Agent (`waagent`) not ready | Check guest agent service status on VM |

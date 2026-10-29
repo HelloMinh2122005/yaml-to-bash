@@ -10,7 +10,43 @@ from pathlib import Path
 from y2b.config import Job, Step
 
 TEMPLATE_PATH = Path(__file__).parent / "templates" / "remote.sh.tpl"
+COLLECT_TEMPLATE_PATH = Path(__file__).parent / "templates" / "collect.sh.tpl"
 MAX_RECOMMENDED_SIZE_BYTES = 200 * 1024  # 200 KB size warning threshold
+
+
+WRITE_RESULT_PATTERN = re.compile(r'write_result\s+["\']?([A-Z_][A-Z0-9_]*)\b')
+
+
+def scan_written_vars(step: Step | dict | str) -> set[str]:
+    """
+    Statically scan a step body or script file for written variable names.
+    Matches write_result NAME VALUE or write_result "NAME" ...
+    Returns set of variable names (excluding reserved __Y2B_*).
+    """
+    if isinstance(step, str):
+        body = step
+    elif isinstance(step, dict):
+        sp = step.get("script_path")
+        if sp:
+            try:
+                with open(sp, "r", encoding="utf-8") as f:
+                    body = f.read()
+            except Exception:
+                body = ""
+        else:
+            body = step.get("script") or ""
+    else:
+        if step.script_path:
+            try:
+                with open(step.script_path, "r", encoding="utf-8") as f:
+                    body = f.read()
+            except Exception:
+                body = ""
+        else:
+            body = step.script or ""
+
+    matches = WRITE_RESULT_PATTERN.findall(body)
+    return {m for m in matches if not m.startswith("__Y2B_")}
 
 
 def _clean_script_body(body: str, is_file: bool = False) -> str:
@@ -33,7 +69,7 @@ def _clean_script_body(body: str, is_file: bool = False) -> str:
     return "\n".join(lines)
 
 
-def compile_job(job: Job) -> tuple[str, list[str]]:
+def compile_job(job: Job, run_id: str = "preview") -> tuple[str, list[str]]:
     """
     Compile runcommand steps into a single composite bash script.
     Returns:
@@ -51,9 +87,6 @@ def compile_job(job: Job) -> tuple[str, list[str]]:
     step_funcs: list[str] = []
     func_names: list[str] = []
     run_step_lines: list[str] = []
-
-    # Calculate padding for nice alignment
-    max_var_len = max(len(s.var) for s in rc.steps)
 
     for i, step in enumerate(rc.steps, start=1):
         func_name = f"y2b_step_{i}"
@@ -82,8 +115,7 @@ def compile_job(job: Job) -> tuple[str, list[str]]:
         func_decl = f"{func_name}() {{            # {step.name}{comment_src}\n{body_indented}\n}}"
         step_funcs.append(func_decl)
 
-        var_padded = step.var.ljust(max_var_len)
-        run_step_lines.append(f"run_step {var_padded} {func_name} {step.timeout}")
+        run_step_lines.append(f"run_step {func_name} {step.timeout} {i} {shlex.quote(step.name)}")
 
     step_functions_block = "\n".join(step_funcs)
     export_functions_line = f"export -f {' '.join(func_names)}"
@@ -93,6 +125,7 @@ def compile_job(job: Job) -> tuple[str, list[str]]:
         template
         .replace("__JOB_NAME__", job.yaml_path.name)
         .replace("__JOB_HASH__", job.job_hash)
+        .replace("__RUN_ID__", run_id)
         .replace("__RES_FILE__", shlex.quote(rc.res_file))
         .replace("__LOG_FILE__", shlex.quote(rc.log_file))
         .replace("__STEP_FUNCTIONS__", step_functions_block)
@@ -121,6 +154,39 @@ def compile_job(job: Job) -> tuple[str, list[str]]:
             errors.append(f"Syntax error in compiled bash script:\n{proc.stderr.strip()}")
     except FileNotFoundError:
         # bash not installed on host, skip bash -n
+        pass
+
+    return compiled, errors
+
+
+def compile_collect_script(job: Job) -> tuple[str, list[str]]:
+    """
+    Compile host-side reader script template.
+    Returns:
+        (compiled_script, errors)
+    """
+    errors: list[str] = []
+    rc = job.invoke.runcommand
+    res_file = rc.res_file if rc else ""
+    if not res_file:
+        errors.append("No runcommand.res_file defined for collect script")
+        return "", errors
+
+    with open(COLLECT_TEMPLATE_PATH, "r", encoding="utf-8") as f:
+        template = f.read()
+
+    compiled = template.replace("__RES_FILE__", shlex.quote(res_file))
+
+    try:
+        proc = subprocess.run(
+            ["bash", "-n"],
+            input=compiled,
+            text=True,
+            capture_output=True,
+        )
+        if proc.returncode != 0:
+            errors.append(f"Syntax error in compiled collect script:\n{proc.stderr.strip()}")
+    except FileNotFoundError:
         pass
 
     return compiled, errors

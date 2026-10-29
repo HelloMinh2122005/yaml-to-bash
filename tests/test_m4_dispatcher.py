@@ -1,4 +1,4 @@
-"""Tests for Milestone M4: Dispatcher and fake az integration."""
+"""Tests for Milestone M3: Dispatcher, invoke_nowait, and read_results."""
 
 import os
 import sys
@@ -7,6 +7,8 @@ import pytest
 
 from y2b.config import Job, Invoke, RunCommand
 from y2b.dispatcher import (
+    invoke_nowait,
+    read_results,
     dispatch_vm,
     classify_error,
     parse_run_command_output,
@@ -21,26 +23,13 @@ FAKE_AZ_DIR = Path(__file__).parent / "fake_az"
 
 @pytest.fixture(autouse=True)
 def setup_fake_az_env(monkeypatch, tmp_path):
-    # Put fake_az first on PATH
     old_path = os.environ.get("PATH", "")
     monkeypatch.setenv("PATH", f"{FAKE_AZ_DIR}:{old_path}")
     log_file = tmp_path / "az_calls.log"
     monkeypatch.setenv("FAKE_AZ_LOG", str(log_file))
+    state_dir = tmp_path / "fake_az_state"
+    monkeypatch.setenv("FAKE_AZ_STATE_DIR", str(state_dir))
     return log_file
-
-
-def make_test_job(tmp_path: Path, timeout: int = 1800) -> Job:
-    return Job(
-        yaml_path=tmp_path / "job.yaml",
-        yaml_dir=tmp_path,
-        raw_yaml={},
-        job_hash="test-hash",
-        input=tmp_path / "list.csv",
-        output_log=tmp_path / "out.log",
-        output_csv=tmp_path / "out.csv",
-        run_timeout=timeout,
-        invoke=Invoke(runcommand=RunCommand(res_file="/var/tmp/res", log_file="/var/tmp/log")),
-    )
 
 
 def make_test_row(name: str = "vm-01") -> VMRow:
@@ -64,169 +53,222 @@ def test_classify_error():
     assert classify_error("Some random unhandled exception", 1) == "unknown"
 
 
-def test_dispatch_success(tmp_path, monkeypatch):
-    monkeypatch.setenv("FAKE_AZ_RC_DEFAULT", "success")
-    job = make_test_job(tmp_path)
+# ==============================================================================
+# invoke_nowait Tests (Phase 1)
+# ==============================================================================
+
+def test_invoke_nowait_success(tmp_path, monkeypatch):
     row = make_test_row()
     logger = VMLogger(row.vm_name, row.index)
     script_path = tmp_path / "remote.sh"
-    script_path.write_text("#!/bin/bash\nexit 0\n")
+    script_path.write_text("#!/bin/bash\nY2B_RUN_ID=run-100\nexit 0\n")
 
-    res = dispatch_vm(job, row, script_path, logger, delay_multiplier=0.001)
-
+    res = invoke_nowait(row, script_path, logger, delay_multiplier=0.001)
+    assert res.success is True
     assert res.error is None
-    assert res.vars.get("HIP_VERSION") == "22102026"
-    assert res.vars.get("KERNEL_COUNT") == "3"
     assert res.attempts == 1
 
 
-def test_dispatch_throttled_retry_and_exhaustion(tmp_path, monkeypatch):
+def test_invoke_nowait_throttled_retry(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_AZ_RC_DEFAULT", "throttled")
-    job = make_test_job(tmp_path)
     row = make_test_row()
     logger = VMLogger(row.vm_name, row.index)
     script_path = tmp_path / "remote.sh"
     script_path.write_text("#!/bin/bash\nexit 0\n")
 
-    # Fast backoff in test
-    res = dispatch_vm(job, row, script_path, logger, delay_multiplier=0.0001)
-
+    res = invoke_nowait(row, script_path, logger, delay_multiplier=0.0001)
+    assert res.success is False
     assert res.error == "ERROR:throttled"
-    # 1 initial + 5 backoff retries = 6 attempts
-    assert res.attempts == 6
+    assert res.attempts == 6  # 1 initial + 5 retries
 
 
-def test_dispatch_busy_retry(tmp_path, monkeypatch):
+def test_invoke_nowait_busy_retry(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_AZ_RC_DEFAULT", "busy")
-    job = make_test_job(tmp_path)
     row = make_test_row()
     logger = VMLogger(row.vm_name, row.index)
     script_path = tmp_path / "remote.sh"
     script_path.write_text("#!/bin/bash\nexit 0\n")
 
-    res = dispatch_vm(job, row, script_path, logger, delay_multiplier=0.0001)
-
+    res = invoke_nowait(row, script_path, logger, delay_multiplier=0.0001)
+    assert res.success is False
     assert res.error == "ERROR:run_command_busy"
-    # 1 initial + 3 retries = 4 attempts
-    assert res.attempts == 4
+    assert res.attempts == 4  # 1 initial + 3 retries
 
 
-def test_dispatch_agent_unavailable(tmp_path, monkeypatch):
+def test_invoke_nowait_agent_and_missing(tmp_path, monkeypatch):
+    row = make_test_row()
+    logger = VMLogger(row.vm_name, row.index)
+    script_path = tmp_path / "remote.sh"
+    script_path.write_text("#!/bin/bash\nexit 0\n")
+
     monkeypatch.setenv("FAKE_AZ_RC_DEFAULT", "agent")
-    job = make_test_job(tmp_path)
-    row = make_test_row()
-    logger = VMLogger(row.vm_name, row.index)
-    script_path = tmp_path / "remote.sh"
-    script_path.write_text("#!/bin/bash\nexit 0\n")
+    res_agent = invoke_nowait(row, script_path, logger)
+    assert res_agent.success is False
+    assert res_agent.error == "ERROR:vm_agent_unavailable"
 
-    res = dispatch_vm(job, row, script_path, logger)
-    assert res.error == "ERROR:vm_agent_unavailable"
-    assert res.attempts == 1
-
-
-def test_dispatch_vm_not_found(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_AZ_RC_DEFAULT", "missing")
-    job = make_test_job(tmp_path)
+    res_missing = invoke_nowait(row, script_path, logger)
+    assert res_missing.success is False
+    assert res_missing.error == "ERROR:vm_not_found"
+
+
+# ==============================================================================
+# read_results Tests (Phase 2 Reader Outcome Table §3.4)
+# ==============================================================================
+
+def test_read_results_success(tmp_path, monkeypatch):
+    # Fired with run_id "my-run-123"
     row = make_test_row()
     logger = VMLogger(row.vm_name, row.index)
-    script_path = tmp_path / "remote.sh"
-    script_path.write_text("#!/bin/bash\nexit 0\n")
+    remote_script = tmp_path / "remote.sh"
+    remote_script.write_text("#!/bin/bash\nY2B_RUN_ID=my-run-123\nexit 0\n")
+    invoke_res = invoke_nowait(row, remote_script, logger)
+    assert invoke_res.success is True
 
-    res = dispatch_vm(job, row, script_path, logger)
-    assert res.error == "ERROR:vm_not_found"
-    assert res.attempts == 1
+    # Read results
+    collect_script = tmp_path / "collect.sh"
+    collect_script.write_text("#!/bin/bash\nexit 0\n")
+    read_res = read_results(row, collect_script, run_id="my-run-123", logger=logger)
+
+    assert read_res.status == "OK"
+    assert read_res.error is None
+    assert read_res.vars.get("HIP_VERSION") == "22102026"
+    assert read_res.vars.get("KERNEL_COUNT") == "3"
 
 
-def test_dispatch_auth_and_circuit_breaker(tmp_path, monkeypatch):
+def test_read_results_busy_returns_still_running(tmp_path, monkeypatch):
+    row = make_test_row()
+    logger = VMLogger(row.vm_name, row.index)
+    # Simulate VM busy running script
+    monkeypatch.setenv(f"FAKE_AZ_RUNTIME_{row.vm_name}", "100")
+    remote_script = tmp_path / "remote.sh"
+    remote_script.write_text("#!/bin/bash\nY2B_RUN_ID=run-busy\nexit 0\n")
+    invoke_nowait(row, remote_script, logger)
+
+    collect_script = tmp_path / "collect.sh"
+    collect_script.write_text("#!/bin/bash\nexit 0\n")
+    read_res = read_results(row, collect_script, run_id="run-busy", logger=logger)
+
+    # Busy should return STILL_RUNNING immediately without using retries in dispatcher!
+    assert read_res.status == "STILL_RUNNING"
+    assert read_res.attempts == 1
+
+
+def test_read_results_remote_incomplete(tmp_path, monkeypatch):
+    row = make_test_row()
+    logger = VMLogger(row.vm_name, row.index)
+    remote_script = tmp_path / "remote.sh"
+    remote_script.write_text("#!/bin/bash\nY2B_RUN_ID=test-run\nexit 0\n")
+    invoke_nowait(row, remote_script, logger)
+
+    monkeypatch.setenv(f"FAKE_AZ_ASYNC_{row.vm_name}", "killed")
+
+    collect_script = tmp_path / "collect.sh"
+    collect_script.write_text("#!/bin/bash\nexit 0\n")
+    read_res = read_results(row, collect_script, run_id="test-run", logger=logger)
+
+    assert read_res.status == "ERROR"
+    assert read_res.error == "ERROR:remote_incomplete"
+
+
+def test_read_results_stale_result(tmp_path, monkeypatch):
+    row = make_test_row()
+    logger = VMLogger(row.vm_name, row.index)
+    monkeypatch.setenv(f"FAKE_AZ_ASYNC_{row.vm_name}", "stale")
+
+    collect_script = tmp_path / "collect.sh"
+    collect_script.write_text("#!/bin/bash\nexit 0\n")
+    read_res = read_results(row, collect_script, run_id="current-run-id", logger=logger)
+
+    assert read_res.status == "ERROR"
+    assert read_res.error == "ERROR:stale_result"
+
+
+def test_read_results_not_started(tmp_path, monkeypatch):
+    row = make_test_row()
+    logger = VMLogger(row.vm_name, row.index)
+    monkeypatch.setenv(f"FAKE_AZ_ASYNC_{row.vm_name}", "never_started")
+
+    collect_script = tmp_path / "collect.sh"
+    collect_script.write_text("#!/bin/bash\nexit 0\n")
+    read_res = read_results(row, collect_script, run_id="current-run-id", logger=logger)
+
+    assert read_res.status == "ERROR"
+    assert read_res.error == "ERROR:not_started"
+
+
+def test_read_results_agent_and_missing(tmp_path, monkeypatch):
+    row = make_test_row()
+    logger = VMLogger(row.vm_name, row.index)
+    collect_script = tmp_path / "collect.sh"
+    collect_script.write_text("#!/bin/bash\nexit 0\n")
+
+    monkeypatch.setenv(f"FAKE_AZ_ASYNC_{row.vm_name}", "agent")
+    res_agent = read_results(row, collect_script, run_id="run-1", logger=logger)
+    assert res_agent.status == "ERROR"
+    assert res_agent.error == "ERROR:vm_agent_unavailable"
+
+    monkeypatch.setenv("FAKE_AZ_RC_DEFAULT", "missing")
+    monkeypatch.delenv(f"FAKE_AZ_ASYNC_{row.vm_name}", raising=False)
+    res_missing = read_results(row, collect_script, run_id="run-1", logger=logger)
+    assert res_missing.status == "ERROR"
+    assert res_missing.error == "ERROR:vm_not_found"
+
+
+def test_read_results_auth_circuit_breaker(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_AZ_RC_DEFAULT", "auth")
-    job = make_test_job(tmp_path)
-    script_path = tmp_path / "remote.sh"
-    script_path.write_text("#!/bin/bash\nexit 0\n")
+    collect_script = tmp_path / "collect.sh"
+    collect_script.write_text("#!/bin/bash\nexit 0\n")
 
     cb = AuthCircuitBreaker(threshold=5)
 
-    # First 4 auth errors don't raise AuthAbortedError, but return ERROR:auth
+    # First 4 auth errors return ERROR:auth
     for i in range(1, 5):
         row = make_test_row(f"vm-{i}")
         logger = VMLogger(row.vm_name, row.index)
-        res = dispatch_vm(job, row, script_path, logger, circuit_breaker=cb)
+        res = read_results(row, collect_script, run_id="run-1", logger=logger, circuit_breaker=cb)
+        assert res.status == "ERROR"
         assert res.error == "ERROR:auth"
         assert not cb.is_tripped
 
-    # 5th consecutive auth error trips the circuit breaker!
+    # 5th error trips circuit breaker
     row5 = make_test_row("vm-5")
     logger5 = VMLogger(row5.vm_name, row5.index)
     with pytest.raises(AuthAbortedError):
-        dispatch_vm(job, row5, script_path, logger5, circuit_breaker=cb)
+        read_results(row5, collect_script, run_id="run-1", logger=logger5, circuit_breaker=cb)
 
     assert cb.is_tripped
 
 
-def test_dispatch_unknown_retry_once(tmp_path, monkeypatch):
-    monkeypatch.setenv("FAKE_AZ_RC_DEFAULT", "unknown")
-    job = make_test_job(tmp_path)
+def test_read_results_truncated_and_timeout(tmp_path, monkeypatch):
     row = make_test_row()
     logger = VMLogger(row.vm_name, row.index)
-    script_path = tmp_path / "remote.sh"
-    script_path.write_text("#!/bin/bash\nexit 0\n")
+    collect_script = tmp_path / "collect.sh"
+    collect_script.write_text("#!/bin/bash\nexit 0\n")
 
-    res = dispatch_vm(job, row, script_path, logger, delay_multiplier=0.0001)
-
-    assert res.error.startswith("ERROR:az:InternalServerError")
-    # 1 initial + 1 retry = 2 attempts
-    assert res.attempts == 2
-
-
-def test_dispatch_truncated_markers(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_AZ_RC_DEFAULT", "truncated")
-    job = make_test_job(tmp_path)
-    row = make_test_row()
-    logger = VMLogger(row.vm_name, row.index)
-    script_path = tmp_path / "remote.sh"
-    script_path.write_text("#!/bin/bash\nexit 0\n")
+    res_trunc = read_results(row, collect_script, run_id="run-1", logger=logger)
+    assert res_trunc.status == "ERROR"
+    assert res_trunc.error == "ERROR:result_truncated"
 
-    res = dispatch_vm(job, row, script_path, logger)
-    assert res.error == "ERROR:result_truncated"
-
-
-def test_dispatch_no_marker_block(tmp_path, monkeypatch):
-    monkeypatch.setenv("FAKE_AZ_RC_DEFAULT", "no_marker")
-    job = make_test_job(tmp_path)
-    row = make_test_row()
-    logger = VMLogger(row.vm_name, row.index)
-    script_path = tmp_path / "remote.sh"
-    script_path.write_text("#!/bin/bash\nexit 0\n")
-
-    res = dispatch_vm(job, row, script_path, logger)
-    assert res.error == "ERROR:no_result_block"
-
-
-def test_dispatch_timeout(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_AZ_RC_DEFAULT", "timeout")
-    job = make_test_job(tmp_path, timeout=1)  # 1 second timeout
-    row = make_test_row()
-    logger = VMLogger(row.vm_name, row.index)
-    script_path = tmp_path / "remote.sh"
-    script_path.write_text("#!/bin/bash\nexit 0\n")
-
-    res = dispatch_vm(job, row, script_path, logger)
-    assert res.error == "ERROR:run_command_timeout"
+    res_to = read_results(row, collect_script, run_id="run-1", logger=logger, timeout=1)
+    assert res_to.status == "ERROR"
+    assert res_to.error == "ERROR:run_command_timeout"
 
 
 def test_every_az_call_has_subscription(tmp_path, monkeypatch, setup_fake_az_env):
     log_file = setup_fake_az_env
-    monkeypatch.setenv("FAKE_AZ_RC_DEFAULT", "success")
-    job = make_test_job(tmp_path)
     row = make_test_row()
     logger = VMLogger(row.vm_name, row.index)
     script_path = tmp_path / "remote.sh"
     script_path.write_text("#!/bin/bash\nexit 0\n")
 
-    dispatch_vm(job, row, script_path, logger)
+    invoke_nowait(row, script_path, logger)
+    read_results(row, script_path, run_id="preview", logger=logger)
 
     calls = log_file.read_text(encoding="utf-8").strip().splitlines()
-    assert len(calls) >= 1
+    assert len(calls) == 2
     for call in calls:
         assert "--subscription" in call
         assert "sub-12345" in call
-

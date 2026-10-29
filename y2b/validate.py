@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from y2b.config import Job, load_yaml_raw, parse_job_from_dict
+from y2b.compiler import scan_written_vars
+from y2b.config import Job, load_yaml_raw, parse_job_from_dict, parse_duration
 
 VAR_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 INPUT_SOURCE_PATTERN = re.compile(r"^input\.(.+)$")
@@ -74,17 +75,40 @@ def validate_job_dict(raw: dict[str, Any], yaml_path: str | Path) -> ValidationR
         if not isinstance(par, int) or isinstance(par, bool) or par < 1 or par > 100:
             err("parallel", f"Invalid parallel '{par}'; must be an integer between 1 and 100")
 
-    # sleep_before_collect
-    if "sleep_before_collect" in raw:
-        sbc = raw["sleep_before_collect"]
-        if not isinstance(sbc, (int, float)) or isinstance(sbc, bool) or sbc < 0:
-            err("sleep_before_collect", f"Invalid sleep_before_collect '{sbc}'; must be a number >= 0")
+    # sleep_before_collect (required)
+    sbc_seconds = None
+    if "sleep_before_collect" not in raw:
+        err("sleep_before_collect", "Missing required field 'sleep_before_collect'")
+    else:
+        try:
+            sbc_seconds = parse_duration(raw["sleep_before_collect"])
+        except ValueError as e:
+            err("sleep_before_collect", f"Invalid sleep_before_collect '{raw['sleep_before_collect']}': {e}")
 
-    # run_timeout
+    # collect_retry_interval (optional, default 30s)
+    cri_seconds = 30.0
+    if "collect_retry_interval" in raw:
+        try:
+            cri_val = parse_duration(raw["collect_retry_interval"])
+            if cri_val <= 0:
+                err("collect_retry_interval", f"Invalid collect_retry_interval '{raw['collect_retry_interval']}'; must be > 0")
+            else:
+                cri_seconds = cri_val
+        except ValueError as e:
+            err("collect_retry_interval", f"Invalid collect_retry_interval '{raw['collect_retry_interval']}': {e}")
+
+    # collect_retries (optional, default 3)
+    cr_count = 3
+    if "collect_retries" in raw:
+        cr_raw = raw["collect_retries"]
+        if not isinstance(cr_raw, int) or isinstance(cr_raw, bool) or cr_raw < 0:
+            err("collect_retries", f"Invalid collect_retries '{cr_raw}'; must be an integer >= 0")
+        else:
+            cr_count = cr_raw
+
+    # run_timeout (deprecated)
     if "run_timeout" in raw:
-        rt = raw["run_timeout"]
-        if not isinstance(rt, int) or isinstance(rt, bool) or rt <= 0:
-            err("run_timeout", f"Invalid run_timeout '{rt}'; must be a positive integer")
+        warn("run_timeout", "'run_timeout' is deprecated and ignored; collect timing is controlled by sleep_before_collect, collect_retry_interval, and collect_retries")
 
     # invoke section
     invoke = raw.get("invoke")
@@ -156,7 +180,7 @@ def validate_job_dict(raw: dict[str, Any], yaml_path: str | Path) -> ValidationR
 
     # invoke.runcommand
     rc = invoke.get("runcommand")
-    step_vars: set[str] = set()
+    var_to_steps: dict[str, list[int]] = {}
     if not isinstance(rc, dict):
         err("invoke.runcommand", "Missing required 'runcommand' mapping under 'invoke'")
     else:
@@ -187,38 +211,67 @@ def validate_job_dict(raw: dict[str, Any], yaml_path: str | Path) -> ValidationR
                         err(f"{s_path}.name", f"Duplicate step name '{name}'")
                     seen_step_names.add(name)
 
-                var = s.get("var")
-                if not var or not isinstance(var, str):
-                    err(f"{s_path}.var", "Step must have a non-empty 'var'")
-                else:
-                    if not VAR_PATTERN.match(var):
-                        err(f"{s_path}.var", f"Variable name '{var}' is invalid (must match ^[A-Z_][A-Z0-9_]*$)")
-                    elif var in step_vars:
-                        err(f"{s_path}.var", f"Duplicate variable name '{var}'")
-                    else:
-                        step_vars.add(var)
+                if "var" in s:
+                    err(f"{s_path}.var", "remove 'var'; use 'write_result NAME VALUE'")
 
                 has_script = "script" in s and s["script"] is not None
                 has_script_path = "script_path" in s and s["script_path"] is not None
                 if (has_script and has_script_path) or (not has_script and not has_script_path):
                     err(s_path, "Step must define exactly one of 'script' or 'script_path'")
 
+                step_body = ""
                 if has_script_path:
                     sp = str(s["script_path"])
                     resolved = resolve_path(sp)
                     if not resolved or not resolved.is_file():
                         err(f"{s_path}.script_path", f"Script file not found or not readable: '{sp}'")
-                    elif not os.access(resolved, os.X_OK):
-                        warn(f"{s_path}.script_path", f"Script file '{sp}' is not executable (harmless since embedded)")
+                    else:
+                        if not os.access(resolved, os.X_OK):
+                            warn(f"{s_path}.script_path", f"Script file '{sp}' is not executable (harmless since embedded)")
+                        try:
+                            with open(resolved, "r", encoding="utf-8") as sf:
+                                step_body = sf.read()
+                        except Exception:
+                            step_body = ""
+                elif has_script:
+                    step_body = str(s["script"] or "")
+
+                written = scan_written_vars(step_body)
+                for v in written:
+                    var_to_steps.setdefault(v, []).append(i)
 
                 if "timeout" in s:
                     t = s["timeout"]
                     if not isinstance(t, int) or isinstance(t, bool) or t <= 0:
                         err(f"{s_path}.timeout", f"Invalid timeout '{t}'; must be a positive integer")
 
+            for v_name, step_indices in var_to_steps.items():
+                if len(step_indices) > 1:
+                    warn("invoke.runcommand.steps", f"Variable '{v_name}' is written by multiple steps (last write wins)")
+
+            sum_step_timeouts = 0
+            for s in steps:
+                if isinstance(s, dict):
+                    t = s.get("timeout", 120)
+                    if isinstance(t, int) and not isinstance(t, bool) and t > 0:
+                        sum_step_timeouts += t
+
+            if sbc_seconds is not None:
+                max_wait_time = sbc_seconds + (cr_count * cri_seconds)
+                if sum_step_timeouts > max_wait_time:
+                    warn(
+                        "invoke.runcommand.steps",
+                        f"Sum of step timeouts ({sum_step_timeouts}s) exceeds total collect wait time ({max_wait_time:.0f}s = sleep_before_collect + collect_retries * collect_retry_interval)",
+                    )
+
+            if sum_step_timeouts > 5400:
+                warn(
+                    "invoke.runcommand.steps",
+                    f"Sum of step timeouts ({sum_step_timeouts}s) exceeds Azure's 90-minute (5400s) run-command cap",
+                )
+
     # collect
     collect = raw.get("collect")
-    referenced_vars: set[str] = set()
     if not isinstance(collect, list) or len(collect) == 0:
         err("collect", "Missing or empty 'collect' list")
     else:
@@ -245,9 +298,12 @@ def validate_job_dict(raw: dict[str, Any], yaml_path: str | Path) -> ValidationR
             src_type = sources[0]
             if src_type == "var":
                 v = str(c["var"])
-                referenced_vars.add(v)
-                if v not in step_vars:
-                    err(f"{c_path}.var", f"Referenced variable '{v}' is not declared by any runcommand step")
+                if not VAR_PATTERN.match(v):
+                    err(f"{c_path}.var", f"Variable name '{v}' is invalid (must match ^[A-Z_][A-Z0-9_]*$)")
+                elif v.startswith("__Y2B_"):
+                    err(f"{c_path}.var", f"Variable name '{v}' is reserved (cannot start with __Y2B_)")
+                elif v not in var_to_steps:
+                    warn(f"{c_path}.var", f"Referenced variable '{v}' is not written by any runcommand step (static check; ignore if set dynamically)")
             elif src_type == "source":
                 s = str(c["source"])
                 if not INPUT_SOURCE_PATTERN.match(s):
@@ -264,11 +320,6 @@ def validate_job_dict(raw: dict[str, Any], yaml_path: str | Path) -> ValidationR
                 t = c["timeout"]
                 if not isinstance(t, int) or isinstance(t, bool) or t <= 0:
                     err(f"{c_path}.timeout", f"Invalid timeout '{t}'; must be a positive integer")
-
-    # Warn about unused step vars
-    for v in step_vars:
-        if v not in referenced_vars:
-            warn("invoke.runcommand.steps", f"Variable '{v}' is declared in a step but never used in 'collect'")
 
     return ValidationResult(errors=errors, warnings=warnings)
 

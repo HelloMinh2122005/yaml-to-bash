@@ -7,6 +7,7 @@ import datetime
 import json
 import os
 import re
+import secrets
 from pathlib import Path
 from typing import Any
 
@@ -21,14 +22,42 @@ def get_parts_dir(output_csv: Path) -> Path:
     return resolved.parent / f".{resolved.stem}.parts"
 
 
+def generate_run_id() -> str:
+    """Generate a run ID: <UTC yyyymmddThhmmssZ>-<8 hex>."""
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    return f"{now_utc.strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(4)}"
+
+
+def get_run_info(parts_dir: Path) -> dict[str, Any]:
+    """Read run.json metadata."""
+    run_json_path = parts_dir / "run.json"
+    with open(run_json_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def update_run_phase(parts_dir: Path, phase: str) -> None:
+    """Update phase in run.json atomically ('invoke' | 'collect' | 'merged')."""
+    run_json_path = parts_dir / "run.json"
+    with open(run_json_path, "r", encoding="utf-8") as f:
+        info = json.load(f)
+    info["phase"] = phase
+    tmp_path = run_json_path.with_suffix(".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(info, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, run_json_path)
+
+
 def init_parts_dir(
     parts_dir: Path,
     job: Job,
     total_rows: int,
     parallel: int,
     resume: bool = False,
-) -> None:
-    """Initialize or validate parts directory for a run."""
+    run_id: str | None = None,
+) -> str:
+    """Initialize or validate parts directory for a run. Returns run_id."""
     run_json_path = parts_dir / "run.json"
 
     if parts_dir.exists() and not resume:
@@ -49,21 +78,26 @@ def init_parts_dir(
                 raise ValueError(
                     f"Cannot resume: stored job hash '{stored_hash}' does not match current job hash '{job.job_hash}'."
                 )
+            stored_run_id = data.get("run_id") or generate_run_id()
+            return stored_run_id
         except Exception as e:
             raise RuntimeError(f"Failed to validate run.json during resume: {e}") from e
-        return
 
     # Fresh run
     parts_dir.mkdir(parents=True, exist_ok=True)
+    actual_run_id = run_id or generate_run_id()
     info = {
         "job_hash": job.job_hash,
         "job_name": job.yaml_path.name,
+        "run_id": actual_run_id,
+        "phase": "invoke",
         "start_time": datetime.datetime.now().astimezone().isoformat(),
         "total_rows": total_rows,
         "parallel": parallel,
     }
     with open(run_json_path, "w", encoding="utf-8") as f:
         json.dump(info, f, indent=2)
+    return actual_run_id
 
 
 def get_part_paths(parts_dir: Path, row: VMRow, total_rows: int) -> tuple[Path, Path]:
@@ -74,9 +108,23 @@ def get_part_paths(parts_dir: Path, row: VMRow, total_rows: int) -> tuple[Path, 
 
 
 def is_part_finished(parts_dir: Path, row: VMRow, total_rows: int) -> bool:
-    """Check if a finished (non-.tmp) .csv part exists for this VM."""
+    """Check if a finished (non-.tmp) .csv part exists for this VM and does not hold ERROR:still_running."""
     csv_path, _ = get_part_paths(parts_dir, row, total_rows)
-    return csv_path.is_file() and csv_path.stat().st_size > 0
+    if not (csv_path.is_file() and csv_path.stat().st_size > 0):
+        return False
+    row_vals = read_part_row(csv_path)
+    if any("ERROR:still_running" in str(c) for c in row_vals):
+        return False
+    return True
+
+
+def is_part_still_running(parts_dir: Path, row: VMRow, total_rows: int) -> bool:
+    """Check if a part file exists and holds ERROR:still_running."""
+    csv_path, _ = get_part_paths(parts_dir, row, total_rows)
+    if not (csv_path.is_file() and csv_path.stat().st_size > 0):
+        return False
+    row_vals = read_part_row(csv_path)
+    return any("ERROR:still_running" in str(c) for c in row_vals)
 
 
 def write_part_files(

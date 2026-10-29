@@ -4,8 +4,10 @@ Fake Azure CLI (az) driven by environment variables and fixture configuration.
 Used in tests to simulate all Azure CLI behaviors, error states, and run-command outputs.
 """
 
+import base64
 import json
 import os
+import re
 import sys
 import time
 
@@ -27,6 +29,28 @@ if "-n" in args:
     idx = args.index("-n")
     if idx + 1 < len(args):
         vm_name = args[idx + 1]
+
+state_dir = os.environ.get("FAKE_AZ_STATE_DIR", "/tmp/fake_az_state")
+os.makedirs(state_dir, exist_ok=True)
+
+
+def get_counter(counter_name: str, env_key: str) -> int:
+    counter_file = os.path.join(state_dir, f"{vm_name}_{counter_name}.txt")
+    if not os.path.exists(counter_file):
+        val = int(os.environ.get(env_key, "0"))
+        with open(counter_file, "w", encoding="utf-8") as f:
+            f.write(str(val))
+        return val
+    with open(counter_file, "r", encoding="utf-8") as f:
+        return int(f.read().strip())
+
+
+def decrement_counter(counter_name: str) -> None:
+    counter_file = os.path.join(state_dir, f"{vm_name}_{counter_name}.txt")
+    val = get_counter(counter_name, "")
+    with open(counter_file, "w", encoding="utf-8") as f:
+        f.write(str(max(0, val - 1)))
+
 
 # Handle `az account show`
 if "account" in args and "show" in args:
@@ -58,86 +82,60 @@ if "run-command" in args and "invoke" in args:
     # Check fixtures configuration
     mode = os.environ.get(f"FAKE_AZ_RC_{vm_name}", os.environ.get("FAKE_AZ_RC_DEFAULT", "success"))
 
-    # Throttled retry simulation (e.g. throttle first N times, then succeed)
-    throttle_count_key = f"FAKE_AZ_THROTTLE_COUNT_{vm_name}"
-    if throttle_count_key in os.environ:
-        count = int(os.environ[throttle_count_key])
-        if count > 0:
-            os.environ[throttle_count_key] = str(count - 1)
-            sys.stderr.write("TooManyRequests: 429 Client Error: Throttled\n")
-            sys.exit(1)
-        else:
-            mode = "success"
+    # Throttled retry simulation (only for reader calls or when not no-wait)
+    if "--no-wait" not in args:
+        throttle_count_key = f"FAKE_AZ_THROTTLE_COUNT_{vm_name}"
+        if throttle_count_key in os.environ:
+            count = get_counter("throttle", throttle_count_key)
+            if count > 0:
+                decrement_counter("throttle")
+                sys.stderr.write("TooManyRequests: 429 Client Error: Throttled\n")
+                sys.exit(1)
+            else:
+                mode = "success"
 
-    # Busy retry simulation
-    busy_count_key = f"FAKE_AZ_BUSY_COUNT_{vm_name}"
-    if busy_count_key in os.environ:
-        count = int(os.environ[busy_count_key])
-        if count > 0:
-            os.environ[busy_count_key] = str(count - 1)
-            sys.stderr.write("Conflict: Operation in progress on VM\n")
-            sys.exit(1)
-        else:
-            mode = "success"
+        # Busy retry simulation
+        busy_count_key = f"FAKE_AZ_BUSY_COUNT_{vm_name}"
+        if busy_count_key in os.environ:
+            count = get_counter("busy", busy_count_key)
+            if count > 0:
+                decrement_counter("busy")
+                sys.stderr.write("Conflict: Operation in progress on VM\n")
+                sys.exit(1)
+            else:
+                mode = "success"
 
-    # Unknown retry simulation
-    unknown_count_key = f"FAKE_AZ_UNKNOWN_COUNT_{vm_name}"
-    if unknown_count_key in os.environ:
-        count = int(os.environ[unknown_count_key])
-        if count > 0:
-            os.environ[unknown_count_key] = str(count - 1)
-            sys.stderr.write("TemporaryFailure: network blip\n")
-            sys.exit(1)
-        else:
-            mode = "success"
+        # Unknown retry simulation
+        unknown_count_key = f"FAKE_AZ_UNKNOWN_COUNT_{vm_name}"
+        if unknown_count_key in os.environ:
+            count = get_counter("unknown", unknown_count_key)
+            if count > 0:
+                decrement_counter("unknown")
+                sys.stderr.write("TemporaryFailure: network blip\n")
+                sys.exit(1)
+            else:
+                mode = "success"
 
-    if mode == "success":
-        # Success output
-        payload = {
-            "value": [
-                {
-                    "code": "ComponentStatus/StdOut/succeeded",
-                    "displayStatus": "Provisioning succeeded",
-                    "message": (
-                        "[stdout]\n"
-                        "===BEGIN_RESULT_RES===\n"
-                        "HIP_VERSION=MjIxMDIwMjY=\n"
-                        "KERNEL_COUNT=Mw==\n"
-                        "===END_RESULT_RES===\n"
-                        "[stderr]\n"
-                    )
-                }
-            ]
-        }
-        print(json.dumps(payload))
-        sys.exit(0)
-
-    elif mode == "throttled":
+    # Handle basic error modes if requested explicitly via FAKE_AZ_RC
+    if mode == "throttled":
         sys.stderr.write("TooManyRequests: 429 Client Error: Throttled\n")
         sys.exit(1)
-
     elif mode == "busy":
         sys.stderr.write("Conflict: Operation in progress on VM\n")
         sys.exit(1)
-
     elif mode == "agent":
         sys.stderr.write("VMAgentStatusCommunicationError: VM Agent is not ready or responsive\n")
         sys.exit(1)
-
     elif mode == "missing":
         sys.stderr.write("ResourceNotFound: The Resource 'Microsoft.Compute/virtualMachines/...' was not found\n")
         sys.exit(1)
-
     elif mode == "auth":
         sys.stderr.write("AuthorizationFailed: AADSTS700016: Application was not found in directory. Run az login.\n")
         sys.exit(1)
-
     elif mode == "unknown":
         sys.stderr.write("InternalServerError: Azure encountered an unexpected issue\n")
         sys.exit(1)
-
     elif mode == "truncated":
-        # Truncated output: 4 KB buffer dropped the begin marker
         payload = {
             "value": [
                 {
@@ -153,7 +151,6 @@ if "run-command" in args and "invoke" in args:
         }
         print(json.dumps(payload))
         sys.exit(0)
-
     elif mode == "no_marker":
         payload = {
             "value": [
@@ -164,14 +161,128 @@ if "run-command" in args and "invoke" in args:
         }
         print(json.dumps(payload))
         sys.exit(0)
-
     elif mode == "timeout":
         time.sleep(10)
         sys.exit(0)
 
-    else:
-        sys.stderr.write(f"Unknown mode: {mode}\n")
+    # 1. Fire-and-forget: --no-wait
+    if "--no-wait" in args:
+        run_id = "preview"
+        if "--scripts" in args:
+            s_idx = args.index("--scripts")
+            if s_idx + 1 < len(args):
+                s_path = args[s_idx + 1]
+                if s_path.startswith("@"):
+                    s_path = s_path[1:]
+                if os.path.exists(s_path):
+                    with open(s_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    m = re.search(r"Y2B_RUN_ID=([^\s]+)", content)
+                    if m:
+                        run_id = m.group(1).strip("'\"")
+
+        run_file = os.path.join(state_dir, f"{vm_name}_run.json")
+        with open(run_file, "w", encoding="utf-8") as f:
+            json.dump({"run_id": run_id, "started_at": time.time()}, f)
+        sys.exit(0)
+
+    # 2. Synchronous or Reader call
+    # Check async failure simulation (FAKE_AZ_ASYNC_<vm>)
+    async_mode = os.environ.get(f"FAKE_AZ_ASYNC_{vm_name}", "")
+    if async_mode == "agent":
+        sys.stderr.write("VMAgentStatusCommunicationError: VM Agent is not ready or responsive\n")
         sys.exit(1)
+    elif async_mode == "never_started":
+        payload = {
+            "value": [
+                {
+                    "message": "[stdout]\n===BEGIN_RESULT_RES===\n===END_RESULT_RES===\n[stderr]\n"
+                }
+            ]
+        }
+        print(json.dumps(payload))
+        sys.exit(0)
+    elif async_mode == "killed":
+        run_file = os.path.join(state_dir, f"{vm_name}_run.json")
+        run_id = os.environ.get("FAKE_AZ_RUN_ID", "preview")
+        if os.path.exists(run_file):
+            with open(run_file, "r", encoding="utf-8") as f:
+                run_id = json.load(f).get("run_id", run_id)
+        b64_run = base64.b64encode(run_id.encode("utf-8")).decode("ascii")
+        payload = {
+            "value": [
+                {
+                    "message": (
+                        "[stdout]\n"
+                        "===BEGIN_RESULT_RES===\n"
+                        f"__Y2B_RUN__={b64_run}\n"
+                        "HIP_VERSION=MjIxMDIwMjY=\n"
+                        "===END_RESULT_RES===\n"
+                        "[stderr]\n"
+                    )
+                }
+            ]
+        }
+        print(json.dumps(payload))
+        sys.exit(0)
+    elif async_mode == "stale":
+        b64_stale = base64.b64encode(b"stale-run-9999").decode("ascii")
+        payload = {
+            "value": [
+                {
+                    "message": (
+                        "[stdout]\n"
+                        "===BEGIN_RESULT_RES===\n"
+                        f"__Y2B_RUN__={b64_stale}\n"
+                        f"__Y2B_DONE__={b64_stale}\n"
+                        "HIP_VERSION=MjIxMDIwMjY=\n"
+                        "===END_RESULT_RES===\n"
+                        "[stderr]\n"
+                    )
+                }
+            ]
+        }
+        print(json.dumps(payload))
+        sys.exit(0)
+
+    # Check runtime simulation (FAKE_AZ_RUNTIME)
+    runtime_sec = float(os.environ.get(f"FAKE_AZ_RUNTIME_{vm_name}", os.environ.get("FAKE_AZ_RUNTIME", "0")))
+    run_file = os.path.join(state_dir, f"{vm_name}_run.json")
+    run_id = "preview"
+    if os.path.exists(run_file):
+        with open(run_file, "r", encoding="utf-8") as f:
+            rdata = json.load(f)
+            run_id = rdata.get("run_id", "preview")
+            started_at = rdata.get("started_at", 0)
+            if time.time() < started_at + runtime_sec:
+                sys.stderr.write("Conflict: Operation in progress on VM\n")
+                sys.exit(1)
+
+    # Success output
+    b64_run = base64.b64encode(run_id.encode("utf-8")).decode("ascii")
+    b64_ok = base64.b64encode(b"ok").decode("ascii")
+    payload = {
+        "value": [
+            {
+                "code": "ComponentStatus/StdOut/succeeded",
+                "displayStatus": "Provisioning succeeded",
+                "message": (
+                    "[stdout]\n"
+                    "===BEGIN_RESULT_RES===\n"
+                    f"__Y2B_RUN__={b64_run}\n"
+                    f"__Y2B_STEP_1__={b64_ok}\n"
+                    f"__Y2B_STEP_2__={b64_ok}\n"
+                    f"__Y2B_STEP_3__={b64_ok}\n"
+                    "HIP_VERSION=MjIxMDIwMjY=\n"
+                    "KERNEL_COUNT=Mw==\n"
+                    f"__Y2B_DONE__={b64_run}\n"
+                    "===END_RESULT_RES===\n"
+                    "[stderr]\n"
+                )
+            }
+        ]
+    }
+    print(json.dumps(payload))
+    sys.exit(0)
 
 sys.exit(0)
-

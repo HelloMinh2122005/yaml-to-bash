@@ -6,6 +6,7 @@ import re
 import time
 from typing import Any
 
+from y2b.compiler import scan_written_vars
 from y2b.config import Job
 from y2b.dispatcher import RemoteResult
 from y2b.inputcsv import VMRow, to_env_var_name
@@ -40,19 +41,21 @@ def collect_for_vm(
                 logger.log_collect(col.column, val)
         return row_values
 
-    # Successful remote invocation
-    if job.sleep_before_collect > 0:
-        if logger:
-            logger.log(f"Sleeping for {job.sleep_before_collect}s before collection...")
-        time.sleep(job.sleep_before_collect)
-
     # Prepare environment for computed scripts
     env: dict[str, str] = dict(row.env)
     env["VM_STATUS"] = "OK"
 
     if remote_result:
         for k, v in remote_result.vars.items():
-            env[k] = v
+            if not k.startswith("__Y2B_"):
+                env[k] = v
+
+    # Map static vars to step indices (1-based), with later step overwriting earlier
+    var_to_step: dict[str, int] = {}
+    if job.invoke.runcommand and job.invoke.runcommand.steps:
+        for i, step in enumerate(job.invoke.runcommand.steps, start=1):
+            for v in scan_written_vars(step):
+                var_to_step[v] = i
 
     for col in job.collect:
         if col.source:
@@ -61,9 +64,20 @@ def collect_for_vm(
             val = row.raw_data.get(field_name, "")
         elif col.var:
             if remote_result and col.var in remote_result.vars:
+                # Rule 1: X was written -> its value
                 val = remote_result.vars[col.var]
             else:
-                val = "__MISSING__"
+                # Rule 2: X was not written, and the scan maps X to a step whose status is not ok -> __ERROR__ <status>
+                step_idx = var_to_step.get(col.var)
+                if remote_result and step_idx is not None:
+                    step_status = remote_result.vars.get(f"__Y2B_STEP_{step_idx}__")
+                    if step_status and step_status != "ok":
+                        val = f"__ERROR__ {step_status}"
+                    else:
+                        val = "__MISSING__"
+                else:
+                    # Rule 3: Otherwise -> __MISSING__
+                    val = "__MISSING__"
         elif col.script or col.script_path:
             script_code = col.script or ""
             if col.script_path:

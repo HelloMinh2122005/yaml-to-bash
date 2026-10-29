@@ -15,6 +15,15 @@ class VMLogger:
         self.lines: list[str] = []
         self._add_header()
 
+    @classmethod
+    def from_lines(cls, vm_name: str, index: int, lines: list[str]) -> VMLogger:
+        """Create a VMLogger instance populated from previous lines (e.g. from phase 1)."""
+        logger = cls.__new__(cls)
+        logger.vm_name = vm_name
+        logger.index = index
+        logger.lines = list(lines)
+        return logger
+
     def _now_str(self) -> str:
         return datetime.datetime.now().astimezone().isoformat()
 

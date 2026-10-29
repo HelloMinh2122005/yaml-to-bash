@@ -81,26 +81,36 @@ def test_runcommand_relative_paths():
     assert "invoke.runcommand.log_file" in error_paths
 
 
-def test_step_duplicate_name_and_var():
+def test_step_duplicate_name():
     raw = get_valid_raw()
     raw["invoke"]["runcommand"]["steps"].append({
         "name": "check-hip-version",  # Duplicate step name
-        "var": "HIP_VERSION",         # Duplicate step var
         "script": "echo 1",
     })
     res = validate_job_dict(raw, "examples/hip-compliance/job.yaml")
     assert not res.is_valid
     errors_str = [str(e) for e in res.errors]
     assert any("invoke.runcommand.steps[3].name: Duplicate step name" in s for s in errors_str)
-    assert any("invoke.runcommand.steps[3].var: Duplicate variable name" in s for s in errors_str)
 
 
-def test_step_invalid_var_regex():
+def test_step_with_var_rejected_with_migration_hint():
     raw = get_valid_raw()
-    raw["invoke"]["runcommand"]["steps"][0]["var"] = "hip-version-lower"
+    raw["invoke"]["runcommand"]["steps"][0]["var"] = "HIP_VERSION"
     res = validate_job_dict(raw, "examples/hip-compliance/job.yaml")
     assert not res.is_valid
-    assert any("invoke.runcommand.steps[0].var" in e.path for e in res.errors)
+    errors_str = [str(e) for e in res.errors]
+    assert any("remove 'var'; use 'write_result NAME VALUE'" in s for s in errors_str)
+
+
+def test_step_duplicate_written_var_emits_warning():
+    raw = get_valid_raw()
+    raw["invoke"]["runcommand"]["steps"].append({
+        "name": "extra-step",
+        "script": 'write_result HIP_VERSION "2.0"',
+    })
+    res = validate_job_dict(raw, "examples/hip-compliance/job.yaml")
+    assert res.is_valid  # Still valid, only warning
+    assert any("written by multiple steps" in w.message for w in res.warnings)
 
 
 def test_step_missing_script_file():
@@ -121,7 +131,9 @@ def test_collect_unknown_var_and_duplicate_col():
     assert not res.is_valid
     errors_str = [str(e) for e in res.errors]
     assert any("collect[8].column: Duplicate column name" in s for s in errors_str)
-    assert any("collect[8].var: Referenced variable 'UNDEFINED_VAR' is not declared" in s for s in errors_str)
+    # UNDEFINED_VAR is a warning, not an error
+    warnings_str = [str(w) for w in res.warnings]
+    assert any("UNDEFINED_VAR" in s and "not written by any runcommand step" in s for s in warnings_str)
 
 
 def test_collect_invalid_source_format():
@@ -130,3 +142,46 @@ def test_collect_invalid_source_format():
     res = validate_job_dict(raw, "examples/hip-compliance/job.yaml")
     assert not res.is_valid
     assert any("collect[0].source" in e.path for e in res.errors)
+
+
+def test_sleep_before_collect_required():
+    raw = get_valid_raw()
+    del raw["sleep_before_collect"]
+    res = validate_job_dict(raw, "examples/hip-compliance/job.yaml")
+    assert not res.is_valid
+    assert any("sleep_before_collect" in e.path for e in res.errors)
+
+    raw["sleep_before_collect"] = 0
+    res0 = validate_job_dict(raw, "examples/hip-compliance/job.yaml")
+    assert not any("sleep_before_collect" in e.path for e in res0.errors)
+
+
+def test_reserved_var_rejected():
+    raw = get_valid_raw()
+    raw["collect"].append({
+        "column": "y2b_reserved",
+        "var": "__Y2B_CUSTOM",
+    })
+    res = validate_job_dict(raw, "examples/hip-compliance/job.yaml")
+    assert not res.is_valid
+    assert any("is reserved" in str(e) for e in res.errors)
+
+
+def test_validation_warnings():
+    raw = get_valid_raw()
+    raw["run_timeout"] = 300
+    res = validate_job_dict(raw, "examples/hip-compliance/job.yaml")
+    assert any("run_timeout" in w.path for w in res.warnings)
+
+    # Readiness warning
+    raw["sleep_before_collect"] = "10s"
+    raw["collect_retries"] = 1
+    raw["collect_retry_interval"] = "10s"
+    # total wait = 20s. Default steps timeout is 120s each (total >= 360s)
+    res_ready = validate_job_dict(raw, "examples/hip-compliance/job.yaml")
+    assert any("exceeds total collect wait time" in w.message for w in res_ready.warnings)
+
+    # 5400s cap warning
+    raw["invoke"]["runcommand"]["steps"][0]["timeout"] = 6000
+    res_cap = validate_job_dict(raw, "examples/hip-compliance/job.yaml")
+    assert any("5400s" in w.message for w in res_cap.warnings)
