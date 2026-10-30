@@ -8,7 +8,7 @@ This repository provides two declarative Azure VM automation CLI tools backed by
 - `y2b` (`yaml_to_bash`): Automates Azure Linux VMs (`RunShellScript` with bash payloads).
 - `y2p` (`yaml_to_powershell`): Automates Azure Windows VMs (`RunPowerShellScript` with Windows PowerShell 5.1 payloads).
 
-Target scale is 500+ VMs per run. Each target VM gets exactly one `az vm run-command invoke --no-wait` call in Phase 1, and results are collected via an event scheduler in Phase 2. All results are merged into `result.csv` and `result.log` in original input CSV order.
+Target scale is 500+ VMs per run. Each target VM gets exactly one runCommand POST in Phase 1 (`az rest`, not `run-command invoke --no-wait`, which silently drops the request before azure-cli 2.85.0), and results are collected via an event scheduler in Phase 2. All results are merged into `result.csv` and `result.log` in original input CSV order.
 
 User-facing docs: [README.md](README.md) and [USER_GUIDE.md](USER_GUIDE.md).
 

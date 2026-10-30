@@ -1,11 +1,13 @@
 """Tests for Milestone M3: Dispatcher, invoke_nowait, and read_results."""
 
+import json
 import os
 import sys
 from pathlib import Path
 import pytest
 
 from y2shared.config import Job, Invoke, RunCommand
+from y2shared import dispatcher
 from y2shared.dispatcher import (
     invoke_nowait,
     read_results,
@@ -28,6 +30,8 @@ def setup_fake_az_env(monkeypatch, tmp_path):
     monkeypatch.setenv("FAKE_AZ_LOG", str(log_file))
     state_dir = tmp_path / "fake_az_state"
     monkeypatch.setenv("FAKE_AZ_STATE_DIR", str(state_dir))
+    # subscription IDs are cached per process; start every test with an empty cache
+    monkeypatch.setattr(dispatcher, "SUBSCRIPTIONS", dispatcher.SubscriptionResolver())
     return log_file
 
 
@@ -66,6 +70,48 @@ def test_invoke_nowait_success(tmp_path, monkeypatch):
     assert res.success is True
     assert res.error is None
     assert res.attempts == 1
+
+
+def test_invoke_nowait_posts_run_command_via_az_rest(tmp_path, setup_fake_az_env):
+    # Phase 1 must not depend on `--no-wait` (silently drops the request before azure-cli 2.85.0)
+    row = make_test_row()
+    logger = VMLogger(row.vm_name, row.index)
+    script_path = tmp_path / "remote.sh"
+    script_path.write_text("#!/bin/bash\nY2B_RUN_ID=run-100\necho 'a \"quoted\" line'\nexit 0\n")
+
+    res = invoke_nowait(row, script_path, logger, command_id="RunShellScript")
+    assert res.success is True
+
+    calls = setup_fake_az_env.read_text(encoding="utf-8").splitlines()
+    # subscription name from the CSV is resolved to its ID once
+    assert "account show --subscription sub-12345 --query id -o tsv" in calls
+    rest_calls = [c for c in calls if c.startswith("rest ")]
+    assert rest_calls == [
+        "rest --method post --url /subscriptions/11111111-2222-3333-4444-555555555555"
+        "/resourceGroups/rg-test/providers/Microsoft.Compute/virtualMachines/vm-01"
+        f"/runCommand?api-version=2024-07-01 --body @{script_path}.body.json"
+    ]
+    assert not any("--no-wait" in c for c in calls)
+
+    body = json.loads((tmp_path / "remote.sh.body.json").read_text(encoding="utf-8"))
+    assert body == {"commandId": "RunShellScript", "script": [script_path.read_text(encoding="utf-8")]}
+
+
+def test_invoke_nowait_guid_subscription_needs_no_lookup(tmp_path, setup_fake_az_env):
+    guid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    row = make_test_row()
+    row.subscription = guid
+    script_path = tmp_path / "remote.ps1"
+    script_path.write_text("$Y2B_RUN_ID = 'run-200'\nexit 0\n")
+
+    res = invoke_nowait(row, script_path, VMLogger(row.vm_name, row.index), command_id="RunPowerShellScript")
+    assert res.success is True
+
+    calls = setup_fake_az_env.read_text(encoding="utf-8").splitlines()
+    assert not any(c.startswith("account show") for c in calls)
+    assert [c for c in calls if c.startswith("rest ")][0].startswith(f"rest --method post --url /subscriptions/{guid}/")
+    body = json.loads((tmp_path / "remote.ps1.body.json").read_text(encoding="utf-8"))
+    assert body["commandId"] == "RunPowerShellScript"
 
 
 def test_invoke_nowait_throttled_retry(tmp_path, monkeypatch):
@@ -194,6 +240,15 @@ def test_read_results_not_started(tmp_path, monkeypatch):
 
     assert read_res.status == "ERROR"
     assert read_res.error == "ERROR:not_started"
+    # The reader's status line explains why: here the res_file was never created
+    assert any("res_file missing" in line and "boot 2026-10-30 09:58:00" in line for line in logger.lines)
+
+
+def test_reader_diagnostics_absent():
+    from y2shared.dispatcher import reader_diagnostics
+    assert reader_diagnostics("[stdout]\n===BEGIN_RESULT_RES===\n===END_RESULT_RES===\n") == (
+        "y2-reader: no diagnostics in reader output"
+    )
 
 
 def test_read_results_agent_and_missing(tmp_path, monkeypatch):
@@ -266,8 +321,11 @@ def test_every_az_call_has_subscription(tmp_path, monkeypatch, setup_fake_az_env
     invoke_nowait(row, script_path, logger)
     read_results(row, script_path, run_id="preview", logger=logger)
 
+    # name -> ID lookup, runCommand POST (subscription in its URL), reader
     calls = log_file.read_text(encoding="utf-8").strip().splitlines()
-    assert len(calls) == 2
+    assert len(calls) == 3
     for call in calls:
-        assert "--subscription" in call
-        assert "sub-12345" in call
+        if call.startswith("rest "):
+            assert " --url /subscriptions/11111111-2222-3333-4444-555555555555/" in call
+        else:
+            assert "--subscription sub-12345" in call

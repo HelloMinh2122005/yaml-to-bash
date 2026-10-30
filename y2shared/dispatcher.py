@@ -9,7 +9,10 @@ import random
 import re
 import shlex
 import subprocess
+import tempfile
+import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -20,6 +23,12 @@ from y2shared.vmlog import VMLogger
 
 INVOKE_CALL_TIMEOUT = 300
 READER_CALL_TIMEOUT = 300
+
+# Phase 1 POSTs the runCommand action through `az rest` instead of `az vm run-command invoke --no-wait`:
+# `az rest` returns on the 202 Accepted without polling, on every azure-cli version, whereas `--no-wait`
+# exits 0 without sending the request before azure-cli 2.85.0 (Azure/azure-cli#32979).
+RUN_COMMAND_API_VERSION = "2024-07-01"
+GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
 class AuthCircuitBreaker:
@@ -72,7 +81,7 @@ RemoteResult = ReadResult
 
 
 # Error classification patterns
-PATTERNS_THROTTLED = ("toomanyrequests", "429", "throttl")
+PATTERNS_THROTTLED = ("toomanyrequests", "too many requests", "429", "throttl")
 PATTERNS_BUSY = ("conflict", "in progress", "operationnotallowed")
 PATTERNS_AGENT = ("vmagentstatuscommunicationerror", "agent not ready", "agent is not ready")
 PATTERNS_NOT_FOUND = ("resourcenotfound",)
@@ -194,6 +203,12 @@ def parse_run_command_output(
     return parsed_vars, None, message
 
 
+def reader_diagnostics(message: str) -> str:
+    """Return the reader's 'y2-reader:' status lines (res_file size/mtime, VM boot time) from a run-command message."""
+    lines = [ln.strip() for ln in message.splitlines() if ln.strip().startswith("y2-reader:")]
+    return "; ".join(lines) if lines else "y2-reader: no diagnostics in reader output"
+
+
 def _az_run_command(
     cmd: list[str],
     timeout: int,
@@ -309,6 +324,47 @@ def _az_run_command(
                 return f"ERROR:az:{first_stderr_line}", proc.returncode, proc.stdout, proc.stderr, total_attempts, duration
 
 
+class SubscriptionResolver:
+    """Resolves subscription names from the input CSV to IDs (the runCommand URL needs the ID), once per subscription."""
+
+    def __init__(self) -> None:
+        self._ids: dict[str, str] = {}
+        self._locks: dict[str, threading.Lock] = {}
+        self._global_lock = threading.Lock()
+
+    def resolve(self, subscription: str, run_az: Callable[[list[str]], tuple]) -> tuple[str | None, str]:
+        """Return (subscription_id, status); status is "SUCCESS" or an ERROR marker from run_az."""
+        if GUID_RE.match(subscription):
+            return subscription, "SUCCESS"
+        with self._global_lock:
+            lock = self._locks.setdefault(subscription, threading.Lock())
+        with lock:
+            if subscription not in self._ids:
+                status, _, stdout, _, _, _ = run_az(
+                    ["az", "account", "show", "--subscription", subscription, "--query", "id", "-o", "tsv"]
+                )
+                if status != "SUCCESS":
+                    return None, status
+                if not GUID_RE.match(stdout.strip()):
+                    return None, "ERROR:subscription_not_found"
+                self._ids[subscription] = stdout.strip()
+            return self._ids[subscription], "SUCCESS"
+
+
+SUBSCRIPTIONS = SubscriptionResolver()
+
+
+def write_invoke_body(remote_script_path: Path, command_id: str) -> Path:
+    """Write the runCommand request body next to the compiled script (atomic: workers may race on it)."""
+    body_path = remote_script_path.with_name(remote_script_path.name + ".body.json")
+    body = {"commandId": command_id, "script": [remote_script_path.read_text(encoding="utf-8")]}
+    fd, tmp_path = tempfile.mkstemp(dir=str(body_path.parent), prefix=body_path.name, suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(body, f)
+    os.replace(tmp_path, body_path)
+    return body_path
+
+
 def invoke_nowait(
     row: VMRow,
     remote_script_path: Path,
@@ -320,40 +376,40 @@ def invoke_nowait(
     command_id: str = "RunShellScript",
 ) -> InvokeResult:
     """
-    Fire the compiled script on the VM with --no-wait.
+    Fire the compiled script on the VM without waiting: one runCommand POST via `az rest`,
+    which returns as soon as ARM answers 202 Accepted.
     Returns:
         InvokeResult(success=True) on rc 0, or InvokeResult(success=False, error=marker).
     """
-    cmd = [
-        "az",
-        "vm",
-        "run-command",
-        "invoke",
-        "--subscription",
-        row.subscription,
-        "-g",
-        row.resource_group,
-        "-n",
-        row.vm_name,
-        "--command-id",
-        command_id,
-        "--scripts",
-        f"@{remote_script_path}",
-        "--no-wait",
-    ]
+    def run_az(cmd: list[str]) -> tuple:
+        return _az_run_command(
+            cmd=cmd,
+            timeout=timeout,
+            busy_policy="retry",
+            logger=logger,
+            circuit_breaker=circuit_breaker,
+            delay_multiplier=delay_multiplier,
+            sleep_fn=sleep_fn,
+        )
 
-    status, rc, stdout, stderr, attempts, duration = _az_run_command(
-        cmd=cmd,
-        timeout=timeout,
-        busy_policy="retry",
-        logger=logger,
-        circuit_breaker=circuit_breaker,
-        delay_multiplier=delay_multiplier,
-        sleep_fn=sleep_fn,
+    subscription_id, sub_status = SUBSCRIPTIONS.resolve(row.subscription, run_az)
+    if subscription_id is None:
+        logger.log_error(f"Cannot resolve subscription '{row.subscription}' to an ID ({sub_status})")
+        return InvokeResult(success=False, error=sub_status)
+
+    body_path = write_invoke_body(remote_script_path, command_id)
+    url = (
+        f"/subscriptions/{subscription_id}"
+        f"/resourceGroups/{urllib.parse.quote(row.resource_group, safe='')}"
+        f"/providers/Microsoft.Compute/virtualMachines/{urllib.parse.quote(row.vm_name, safe='')}"
+        f"/runCommand?api-version={RUN_COMMAND_API_VERSION}"
     )
+    cmd = ["az", "rest", "--method", "post", "--url", url, "--body", f"@{body_path}"]
+
+    status, rc, stdout, stderr, attempts, duration = run_az(cmd)
 
     if status == "SUCCESS":
-        logger.log_dispatch(f"invoke --no-wait accepted in {duration:.1f}s.")
+        logger.log_dispatch(f"runCommand POST accepted in {duration:.1f}s (fire and forget).")
         return InvokeResult(
             success=True,
             error=None,
@@ -443,7 +499,7 @@ def read_results(
         )
 
     if "__Y2B_RUN__" not in parsed_vars:
-        logger.log_error("No __Y2B_RUN__ marker in res_file (script never started)")
+        logger.log_error(f"No __Y2B_RUN__ marker in res_file (script never started) [{reader_diagnostics(raw_msg)}]")
         return ReadResult(
             status="ERROR",
             error="ERROR:not_started",
@@ -464,7 +520,10 @@ def read_results(
         )
 
     if "__Y2B_DONE__" not in parsed_vars or parsed_vars.get("__Y2B_DONE__") != run_id:
-        logger.log_error(f"Incomplete remote execution: __Y2B_RUN__ present for '{run_id}', but no valid __Y2B_DONE__ marker")
+        logger.log_error(
+            f"Incomplete remote execution: __Y2B_RUN__ present for '{run_id}', but no valid __Y2B_DONE__ marker "
+            f"[{reader_diagnostics(raw_msg)}]"
+        )
         return ReadResult(
             status="ERROR",
             error="ERROR:remote_incomplete",

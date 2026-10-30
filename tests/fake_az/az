@@ -18,6 +18,29 @@ if log_file:
 
 # Verify that --subscription is always passed (spec rule)
 args = sys.argv[1:]
+
+# Phase 1 invoke: `az rest --method post --url /subscriptions/<id>/.../virtualMachines/<vm>/runCommand?... --body @file`.
+# Translate it into the equivalent fire-and-forget run-command call so the fixtures below apply unchanged.
+if args[:1] == ["rest"]:
+    url = args[args.index("--url") + 1]
+    m = re.search(
+        r"^/subscriptions/([^/]+)/resourceGroups/([^/]+)/providers/Microsoft.Compute/virtualMachines/([^/?]+)/runCommand\?api-version=",
+        url,
+    )
+    if not m:
+        sys.stderr.write(f"Bad Request: unexpected az rest url {url}\n")
+        sys.exit(1)
+    with open(args[args.index("--body") + 1].lstrip("@"), "r", encoding="utf-8") as f:
+        body = json.load(f)
+    rest_dir = os.environ.get("FAKE_AZ_STATE_DIR", "/tmp/fake_az_state")
+    os.makedirs(rest_dir, exist_ok=True)
+    script_file = os.path.join(rest_dir, f"{m.group(3)}_rest_script")
+    with open(script_file, "w", encoding="utf-8") as f:
+        f.write("\n".join(body["script"]))
+    args = [
+        "vm", "run-command", "invoke", "--subscription", m.group(1), "-g", m.group(2), "-n", m.group(3),
+        "--command-id", body["commandId"], "--scripts", f"@{script_file}", "--no-wait",
+    ]
 if "run-command" in args or "get-instance-view" in args or "start" in args:
     if "--subscription" not in args:
         sys.stderr.write("FATAL: az command executed without --subscription flag\n")
@@ -65,6 +88,9 @@ if "account" in args and "show" in args:
     if os.environ.get("FAKE_AZ_ACCOUNT_FAIL"):
         sys.stderr.write("Account show failed\n")
         sys.exit(1)
+    if "--query" in args and "id" in args:
+        print("11111111-2222-3333-4444-555555555555")
+        sys.exit(0)
     print(json.dumps({"id": "sub-prod-01", "name": "Prod Subscription"}))
     sys.exit(0)
 
@@ -204,7 +230,11 @@ if "run-command" in args and "invoke" in args:
         payload = {
             "value": [
                 {
-                    "message": "[stdout]\n===BEGIN_RESULT_RES===\n===END_RESULT_RES===\n[stderr]\n"
+                    "message": (
+                        "[stdout]\n"
+                        "y2-reader: res_file missing, now 2026-10-30T10:00:00+00:00, boot 2026-10-30 09:58:00\n"
+                        "===BEGIN_RESULT_RES===\n===END_RESULT_RES===\n[stderr]\n"
+                    )
                 }
             ]
         }

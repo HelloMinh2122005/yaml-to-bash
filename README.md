@@ -32,7 +32,7 @@ The shared engine (`y2shared`) handles host-side prechecks, concurrency control,
 | **Golden Test File** | `tests/golden/hip_compliance_remote.sh` | `tests/golden/windows_baseline_remote.ps1` |
 
 ### Key Highlights
-- **Fire-and-Forget Two-Phase Execution**: In Phase 1 (Invoke), remote scripts are fired asynchronously via `az vm run-command invoke --no-wait`. In Phase 2 (Collect), the host collects results via reader scripts on an event scheduler. Workers are never held blocked waiting for remote scripts to complete.
+- **Fire-and-Forget Two-Phase Execution**: In Phase 1 (Invoke), remote scripts are fired asynchronously with one runCommand POST per VM (`az rest`, which returns on `202 Accepted` without waiting for the script). In Phase 2 (Collect), the host collects results via reader scripts on an event scheduler. Workers are never held blocked waiting for remote scripts to complete.
 - **Host-Side Prechecks with Subscription Caching**: Verify tenant subscriptions or VM power states before running commands; memoize checks per subscription (`cache: subscription`) to prevent redundant queries. Non-target/skipped VMs never enter the collect phase.
 - **Zero-Corruption Concurrency (Part Files & Merge)**: Workers write exclusively to per-VM part files (`NNNN-<vm_name>.csv` / `.log`). A single-threaded merge step builds `result.csv` and `result.log` in original input order after all workers complete.
 - **Resilient & Resumable**: Safely resume interrupted runs (`--resume`) without repeating work on finished VMs. Built-in auth circuit breaker, exponential backoff with jitter on Azure throttling, and conflict retries.
@@ -44,7 +44,7 @@ The shared engine (`y2shared`) handles host-side prechecks, concurrency control,
 
 - **Runner Host**: macOS (zsh, Python ≥ 3.9) or Linux host.
 - **Python**: Python ≥ 3.9 and PyYAML (`pip install pyyaml`).
-- **Azure CLI**: `az` CLI installed and authenticated on the runner (`az login` or Managed Identity).
+- **Azure CLI**: `az` CLI installed and authenticated on the runner (`az login` or Managed Identity). Any version works: Phase 1 does not use `run-command invoke --no-wait`, which silently drops the request before azure-cli 2.85.0.
 - **Target VMs**:
   - Linux VMs with Azure Linux Agent for `y2b`.
   - Windows VMs with Azure Windows Guest Agent for `y2p`.

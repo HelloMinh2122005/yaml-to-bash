@@ -46,7 +46,7 @@ Traditional automation runs a separate SSH/WinRM command or Azure Run-Command pe
 1. **Host Prechecks**: Evaluating tenant/subscription permissions and power states locally on your runner machine before touching the VM. Non-target or deallocated VMs are skipped before any remote execution.
 2. **Single-Session Compilation**: Bundling all remote checks into **one single composite script** (bash for `y2b`, PowerShell for `y2p`), sent in **one single `az vm run-command invoke` call** per VM.
 3. **Fire-and-Forget Two-Phase Execution**:
-   - **Phase 1 (Invoke)**: Fired with `--no-wait`. Workers do not block waiting for long-running scripts.
+   - **Phase 1 (Invoke)**: Fired with one runCommand POST per VM (`az rest`, returns on `202 Accepted`). Workers do not block waiting for long-running scripts.
    - **Phase 2 (Collect)**: Results are collected after a configured delay (`sleep_before_collect`) via a lightweight reader script on a priority event scheduler.
 4. **Zero-Corruption Concurrency**: Concurrent workers write strictly to their own VM part files (`NNNN-<vm_name>.csv` and `.log`).
 5. **Deterministic Merge**: Sorting and merging all results in original input order into the final CSV report and log after all workers finish.

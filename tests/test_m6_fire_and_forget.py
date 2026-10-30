@@ -90,7 +90,7 @@ collect:
 
 
 # ==============================================================================
-# R1: Fire and forget (fire all first, all --no-wait before first reader)
+# R1: Fire and forget (fire all first, all runCommand POSTs before first reader)
 # ==============================================================================
 
 def test_r1_fire_and_forget_ordering(tmp_path, monkeypatch, setup_fire_and_forget_env):
@@ -123,13 +123,13 @@ def test_r1_fire_and_forget_ordering(tmp_path, monkeypatch, setup_fire_and_forge
     # Check execution order in az log
     calls = log_file.read_text(encoding="utf-8").strip().splitlines()
 
-    nowait_indices = [i for i, c in enumerate(calls) if "--no-wait" in c]
-    reader_indices = [i for i, c in enumerate(calls) if "-o json" in c and "run-command" in c and "--no-wait" not in c]
+    nowait_indices = [i for i, c in enumerate(calls) if c.startswith("rest ")]
+    reader_indices = [i for i, c in enumerate(calls) if "-o json" in c and "run-command" in c]
 
     assert len(nowait_indices) == 20
     assert len(reader_indices) >= 20
 
-    # Every --no-wait call must happen before the first reader call!
+    # Every runCommand POST must happen before the first reader call!
     assert max(nowait_indices) < min(reader_indices)
 
 
@@ -195,7 +195,7 @@ fi
 
     # R2: Reader calls in az log match collect list 1:1 (zero reader calls for skipped / not found)
     calls = log_file.read_text(encoding="utf-8").strip().splitlines()
-    reader_calls = [c for c in calls if "-o json" in c and "run-command" in c and "--no-wait" not in c]
+    reader_calls = [c for c in calls if "-o json" in c and "run-command" in c]
     assert len(reader_calls) == 1
     assert "mix-0001" in reader_calls[0]
     assert not any("mix-0002" in c for c in reader_calls)
@@ -243,7 +243,7 @@ def test_r4_timing_busy_retries(tmp_path, monkeypatch, setup_fire_and_forget_env
 
     # Inspect reader calls: 1 initial attempt + 2 busy retries = 3 reader calls total
     calls = log_file.read_text(encoding="utf-8").strip().splitlines()
-    reader_calls = [c for c in calls if "-o json" in c and "run-command" in c and "--no-wait" not in c]
+    reader_calls = [c for c in calls if "-o json" in c and "run-command" in c]
     assert len(reader_calls) == 3
 
 
@@ -295,13 +295,13 @@ def test_resume_phase1_interruption(tmp_path, monkeypatch, setup_fire_and_forget
     rc = run_job(args)
     assert rc == 0
 
-    # In log_file: res-p1-0001 must NEVER have received a second --no-wait call!
+    # In log_file: res-p1-0001 must NEVER have received a second runCommand POST!
     log_file = setup_fire_and_forget_env
     calls = log_file.read_text(encoding="utf-8").strip().splitlines()
-    nowait_01 = [c for c in calls if "res-p1-0001" in c and "--no-wait" in c]
+    nowait_01 = [c for c in calls if "res-p1-0001" in c and c.startswith("rest ")]
     assert len(nowait_01) == 0  # Was already in collect_list, never re-fired!
 
-    nowait_02 = [c for c in calls if "res-p1-0002" in c and "--no-wait" in c]
+    nowait_02 = [c for c in calls if "res-p1-0002" in c and c.startswith("rest ")]
     assert len(nowait_02) == 1  # VM 2 was fired
 
 
@@ -367,7 +367,7 @@ def test_collect_later_still_running_and_resume(tmp_path, monkeypatch, setup_fir
 
     # Verify no second invoke call
     calls = log_file.read_text(encoding="utf-8").strip().splitlines()
-    assert not any("--no-wait" in c for c in calls)
+    assert not any(c.startswith("rest ") for c in calls)
     assert any("-o json" in c for c in calls)
 
     # result.csv updated with real values
