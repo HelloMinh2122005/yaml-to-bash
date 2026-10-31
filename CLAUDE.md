@@ -23,16 +23,16 @@ python3 -m pytest tests/ -v                # full test suite (100+ tests); run f
 python3 -m pytest tests/test_y2p_unit.py -v # single test file
 
 # Linux CLI (y2b)
-y2b validate examples/hip-compliance/job.yaml
-y2b compile  examples/hip-compliance/job.yaml [-o remote.sh]
-y2b run      examples/hip-compliance/job.yaml --dry-run
-y2b run      examples/hip-compliance/job.yaml --resume
+y2b validate examples/linux/job.yaml
+y2b compile  examples/linux/job.yaml [-o remote.sh]
+y2b run      examples/linux/job.yaml --dry-run
+y2b run      examples/linux/job.yaml --resume
 
 # Windows CLI (y2p)
-y2p validate examples/windows-baseline/job.yaml
-y2p compile  examples/windows-baseline/job.yaml [-o remote.ps1]
-y2p run      examples/windows-baseline/job.yaml --dry-run
-y2p run      examples/windows-baseline/job.yaml --resume
+y2p validate examples/windows/job.yaml
+y2p compile  examples/windows/job.yaml [-o remote.ps1]
+y2p run      examples/windows/job.yaml --dry-run
+y2p run      examples/windows/job.yaml --resume
 ```
 
 `bin/y2b` and `bin/y2p` are cwd-independent wrapper scripts setting `PYTHONPATH` and launching `python3 -m y2b` / `python3 -m y2p`. Runtime dependencies are strictly Python stdlib and PyYAML. Maintain Python 3.9 compatibility across the codebase (no `match`, no `|` union outside annotations, no `zip(strict=)`, no `dataclass(slots=/kw_only=)`).
@@ -72,8 +72,8 @@ yaml_to_bash/
 │   ├── validate.py                  # Windows-specific validation (res_file drive paths, YAML quoting)
 │   └── templates/                   # remote.ps1.tpl, collect.ps1.tpl
 ├── examples/
-│   ├── hip-compliance/              # Linux compliance job example
-│   └── windows-baseline/            # Windows baseline job example
+│   ├── linux/                       # Linux diagnostic job example
+│   └── windows/                     # Windows baseline job example
 └── tests/
     ├── fake_az/az                   # Stand-in Azure CLI mock
     ├── golden/
@@ -94,8 +94,8 @@ yaml_to_bash/
   - `y2p`: Builds composite PowerShell script with `Invoke-Y2Step` table, `write_result` (base64 into `$ResFile`), process timeout killing (`taskkill /T /F`), and Windows two-element JSON parsing.
 - **Host Prechecks & Computed Columns**: Always run on the **host runner using Bash** (via `y2shared.hostenv.resolve_bash()`) for both `y2b` and `y2p`.
 - **Golden Files**:
-  - `tests/golden/hip_compliance_remote.sh`: Must match `y2b compile examples/hip-compliance/job.yaml` byte-for-byte.
-  - `tests/golden/windows_baseline_remote.ps1`: Must match `y2p compile examples/windows-baseline/job.yaml` byte-for-byte.
+  - `tests/golden/hip_compliance_remote.sh`: Must match `y2b compile examples/linux/job.yaml` byte-for-byte.
+  - `tests/golden/windows_baseline_remote.ps1`: Must match `y2p compile examples/windows/job.yaml` byte-for-byte.
   - Recompile using `-o <path>` whenever templates or example jobs are updated.
 - **Testing**:
   - `tests/fake_az/az` simulates Azure CLI responses, throttling, conflict busy states, and auth errors.

@@ -1,0 +1,5 @@
+vm_name,resource_group,subscription,os
+lin01,rg-lab-10vms,79f7da80-0c64-4e4b-9ed4-316a88142152,rhel9
+lin02,rg-lab-10vms,79f7da80-0c64-4e4b-9ed4-316a88142152,rhel8
+lin03,rg-lab-10vms,79f7da80-0c64-4e4b-9ed4-316a88142152,ol8
+

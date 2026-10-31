@@ -1,0 +1,163 @@
+# ==============================================================================
+# Linux Fleet Diagnostics Job Specification (y2b)
+# ==============================================================================
+input: "./list_vm.csv"             # Target inventory CSV
+output_log: "./result.log"         # Consolidated execution log
+output_csv: "./result.csv"         # Final aggregated CSV report
+actions: "start-stop"              # Power policy: "skip" | "start" | "start-stop" | "stop"
+parallel: 5                        # Concurrent VM workers
+
+# Fire-and-forget collect timings
+sleep_before_collect: "15s"        # Wait between invoke and first collect attempt
+collect_retry_interval: "10s"      # Wait interval before retrying a still-running VM
+collect_retries: 3                 # Maximum collection retries before marking still_running
+
+# ==============================================================================
+# Host Pre-flight Checks (pre_run)
+# ==============================================================================
+pre_run:
+  - name: "check-if-subscription-in-tenant"
+    phase: ["invoke"]
+    cache: "subscription"        # Query once per subscription; results cached across threads
+    script: |
+      az account show --subscription "$SUBSCRIPTION" > /dev/null 2>&1
+      if [ $? -eq 0 ]; then
+        echo 0
+      else
+        echo 1
+      fi
+    result:
+      0:
+        log: "Subscription verified in tenant"
+        action: "continue"
+      1:
+        log: "Subscription not found in tenant - skipping VM"
+        action: "end_check"
+
+  - name: "check-if-vm-is-running"
+    phase: ["invoke", "collect"]   # Evaluated in Phase 1 AND before Phase 2 collect read
+    script: |
+      az vm get-instance-view --subscription "$SUBSCRIPTION" -g "$RESOURCE_GROUP" -n "$VM_NAME" \
+        --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code" -o tsv
+    result:
+      "PowerState/running":
+        log: "VM is running"
+        action: "continue"
+      "PowerState/deallocated":
+        log: "VM is deallocated"
+        action: "skip"            # Handled according to root 'actions' policy
+      "PowerState/stopped":
+        log: "VM is stopped"
+        action: "skip"
+      default:
+        log: "VM is not running"
+        action: "skip"
+
+# ==============================================================================
+# Pipeline 1: Remote Execution Payload (y2b RunShellScript)
+# ==============================================================================
+invoke:
+  runcommand:
+    res_file: "/var/tmp/runcommand/result.res"
+    log_file: "/var/tmp/runcommand/result.log"
+    steps:
+      - name: "check-os-release"
+        timeout: 30
+        script: |
+          # Query Linux distribution and version
+          if [ -f /etc/os-release ]; then
+            . /etc/os-release
+            write_result OS_NAME "$NAME"
+            write_result OS_VERSION "$VERSION_ID"
+          else
+            write_result OS_NAME "UNKNOWN"
+            write_result OS_VERSION "UNKNOWN"
+          fi
+
+      - name: "check-kernel-version"
+        timeout: 30
+        script: |
+          # Query active kernel release
+          KERNEL_VER=$(uname -r 2>/dev/null || echo "UNKNOWN")
+          write_result KERNEL_VERSION "$KERNEL_VER"
+
+      - name: "check-uptime-and-load"
+        timeout: 30
+        script: |
+          # Query system uptime seconds and 1-minute load average
+          UPTIME_SECS=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo "0")
+          LOAD_1M=$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo "0.00")
+          write_result UPTIME_SECS "$UPTIME_SECS"
+          write_result LOAD_1M "$LOAD_1M"
+
+      - name: "check-disk-usage"
+        timeout: 30
+        script: |
+          # Query root mount usage percentage
+          ROOT_USE=$(df -h / | awk 'NR==2 {print $5}' 2>/dev/null || echo "0%")
+          write_result ROOT_DISK_USAGE "$ROOT_USE"
+
+      - name: "complex-hardware-audit"
+        timeout: 30
+        script_path: "./scripts/audit_hardware.sh"
+
+# ==============================================================================
+# Pipeline 2: Collect & Transform (CSV Column Mapping)
+# ==============================================================================
+collect:
+  # 1. Passthrough Columns (from input inventory CSV)
+  - column: "vm_name"
+    source: "input.vm_name"
+
+  - column: "resource_group"
+    source: "input.resource_group"
+
+  - column: "subscription"
+    source: "input.subscription"
+
+  - column: "os_target"
+    source: "input.os"
+
+  # 2. Remote Variable Columns (from res_file on VM)
+  - column: "os_name"
+    var: "OS_NAME"
+
+  - column: "os_version"
+    var: "OS_VERSION"
+
+  - column: "kernel_version"
+    var: "KERNEL_VERSION"
+
+  - column: "uptime_secs"
+    var: "UPTIME_SECS"
+
+  - column: "load_1m"
+    var: "LOAD_1M"
+
+  - column: "root_disk_usage"
+    var: "ROOT_DISK_USAGE"
+
+  - column: "hw_audit_status"
+    var: "HW_AUDIT_STATUS"
+
+  # 3. Computed Columns (Evaluated with host bash)
+  - column: "verdict"
+    script: |
+      if [ "$HW_AUDIT_STATUS" = "PASS" ]; then
+        echo "HEALTHY"
+      else
+        echo "ATTENTION"
+      fi
+
+# ==============================================================================
+# Pipeline 3: Post-Run Hooks & Power Actions
+# ==============================================================================
+post_run:
+  - name: "log-audit-summary"
+    timeout: 30
+    script: |
+      echo "[audit] Linux VM $VM_NAME ($RESOURCE_GROUP): outcome=$Y2_OUTCOME, prev_power=$Y2_PREV_POWER_STATE, action=$Y2_ACTIONS, run_id=$Y2_RUN_ID"
+      echo ok
+    result:
+      ok:
+        log: "Audit summary recorded"

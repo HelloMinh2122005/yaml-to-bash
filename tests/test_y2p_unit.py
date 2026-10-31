@@ -30,7 +30,7 @@ def test_os_family_detection():
 
 
 def test_cross_tool_csv_rejection(tmp_path):
-    job = load_job("examples/windows-baseline/job.yaml")
+    job = load_job("examples/windows/job.yaml")
 
     # CSV with Linux OS given to y2p
     csv_linux = tmp_path / "linux.csv"
@@ -48,43 +48,43 @@ def test_cross_tool_csv_rejection(tmp_path):
 
 
 def test_y2p_validation_res_file_rules():
-    with open("examples/windows-baseline/job.yaml", "r", encoding="utf-8") as f:
+    with open("examples/windows/job.yaml", "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 
     # Error: POSIX path
     raw["invoke"]["runcommand"]["res_file"] = "/var/tmp/x"
-    res = y2p_validate_job_dict(raw, "examples/windows-baseline/job.yaml")
+    res = y2p_validate_job_dict(raw, "examples/windows/job.yaml")
     assert not res.is_valid
     assert any("invoke.runcommand.res_file" in e.path for e in res.errors)
 
     # Accepted: C:\path and C:/path
     raw["invoke"]["runcommand"]["res_file"] = r"C:\ProgramData\y2p\res.res"
     raw["invoke"]["runcommand"]["log_file"] = "C:/ProgramData/y2p/log.log"
-    res_ok = y2p_validate_job_dict(raw, "examples/windows-baseline/job.yaml")
+    res_ok = y2p_validate_job_dict(raw, "examples/windows/job.yaml")
     assert res_ok.is_valid
 
     # Warning: Control characters (e.g. \t from tab escape)
     raw["invoke"]["runcommand"]["res_file"] = "C:\temp\res.res"  # \t is tab char
-    res_ctrl = y2p_validate_job_dict(raw, "examples/windows-baseline/job.yaml")
+    res_ctrl = y2p_validate_job_dict(raw, "examples/windows/job.yaml")
     assert any("control character" in w.message for w in res_ctrl.warnings)
 
 
 def test_y2b_validation_rejects_windows_path():
-    with open("examples/hip-compliance/job.yaml", "r", encoding="utf-8") as f:
+    with open("examples/linux/job.yaml", "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
     raw["invoke"]["runcommand"]["res_file"] = r"C:\ProgramData\result.res"
-    res = y2b_validate_job_dict(raw, "examples/hip-compliance/job.yaml")
+    res = y2b_validate_job_dict(raw, "examples/linux/job.yaml")
     assert not res.is_valid
     assert any("invoke.runcommand.res_file" in e.path for e in res.errors)
 
 
 def test_y2p_validation_step_lints():
-    with open("examples/windows-baseline/job.yaml", "r", encoding="utf-8") as f:
+    with open("examples/windows/job.yaml", "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 
     # Error: line starts with '@
     raw["invoke"]["runcommand"]["steps"][0]["script"] = "echo 1\n'@\necho 2"
-    res = y2p_validate_job_dict(raw, "examples/windows-baseline/job.yaml")
+    res = y2p_validate_job_dict(raw, "examples/windows/job.yaml")
     assert not res.is_valid
     assert any("starts with '@" in e.message for e in res.errors)
 
@@ -93,17 +93,17 @@ def test_y2p_validation_step_lints():
 
     # Warning: PowerShell 7 constructs
     raw["invoke"]["runcommand"]["steps"][0]["script"] = "$a = $b ?? $c"
-    res_ps7 = y2p_validate_job_dict(raw, "examples/windows-baseline/job.yaml")
+    res_ps7 = y2p_validate_job_dict(raw, "examples/windows/job.yaml")
     assert any("PowerShell 7-only syntax" in w.message for w in res_ps7.warnings)
 
     # Warning: non-ASCII characters
     raw["invoke"]["runcommand"]["steps"][0]["script"] = "Write-Output 'é日本'"
-    res_ascii = y2p_validate_job_dict(raw, "examples/windows-baseline/job.yaml")
+    res_ascii = y2p_validate_job_dict(raw, "examples/windows/job.yaml")
     assert any("non-ASCII characters" in w.message for w in res_ascii.warnings)
 
     # Warning: script_path without .ps1
     raw["invoke"]["runcommand"]["steps"][3]["script_path"] = "./scripts/check_tls.sh"
-    res_ext = y2p_validate_job_dict(raw, "examples/windows-baseline/job.yaml")
+    res_ext = y2p_validate_job_dict(raw, "examples/windows/job.yaml")
     assert any(".ps1 extension" in w.message for w in res_ext.warnings)
 
 
@@ -162,7 +162,7 @@ def test_parser_windows_truncated():
 
 
 def test_y2p_compiler_golden_and_properties():
-    job = load_job("examples/windows-baseline/job.yaml")
+    job = load_job("examples/windows/job.yaml")
     compiled, errors = compile_job(job)
     assert not errors
 

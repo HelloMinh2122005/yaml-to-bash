@@ -80,7 +80,7 @@ az graph query --first 1000 -o tsv --query "data[].[name, rg, power]" -q "
 Caveats:
 
 - Resource Graph can lag by a few minutes. A VM started just before the run may still show as deallocated, so it is skipped and you rerun it with `vmFilter`.
-- **Do not combine this with `actions: "start"`.** After `az vm start`, the engine re-runs the precheck once ([precheck.py](../y2shared/precheck.py)), and a snapshot file still says "deallocated", which gives `ERROR:start_failed`. Keep the live `get-instance-view` precheck for jobs that start VMs.
+- **Do not combine this with `actions: "start"` or `actions: "start-stop"`.** After `az vm start`, the engine re-runs the precheck once ([precheck.py](../y2shared/precheck.py)), and a snapshot file still says "deallocated", which gives `ERROR:start_failed`. Keep the live `get-instance-view` precheck for jobs that start VMs. Also, under `start-stop` and `stop`, `.power` files (`NNNN-<vm>.power`) track the original VM power state inside the `.parts/` folder to ensure proper restoration or deallocation after post-run hooks.
 - Above 1,000 VMs, page with `--skip-token`, or scope with `--subscriptions` / `--management-groups`.
 - This precheck depends on a file the pipeline creates, so local `y2b run` needs the same file. Generate it with the same `az graph query` command.
 
@@ -106,7 +106,7 @@ The subscription precheck (`az account show`, `cache: subscription`) is already 
 
 ## 9. Rollout order
 
-1. **L1 on 2 VMs** (`--vm` / `vmFilter`) with `examples/hip-compliance`: proves the service connection, RBAC and `result.csv` artifact.
+1. **L1 on 2 VMs** (`--vm` / `vmFilter`) with `examples/linux`: proves the service connection, RBAC and `result.csv` artifact.
 2. **L1 on the full Linux fleet** with Approvals on the Environment. Record Invoke and Collect durations and any throttling.
 3. **Implement `--phase`** ([02 §3](02-two-runcommand-pattern.md#3-the-one-cli-change-needed---phase)) with its tests. Confirm with `tests/fake_az/az` that there are exactly 2 run-commands per VM across the two processes.
 4. **L2 template** on the Linux fleet. Compare `result.csv` with the L1 run (it should match except for timestamps).

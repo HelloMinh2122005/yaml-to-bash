@@ -28,13 +28,14 @@ The shared engine (`y2shared`) handles host-side prechecks, concurrency control,
 | **Host Computed Columns** | Bash (executed on runner host) | Bash (executed on runner host) |
 | **Output JSON Format** | Standard Azure `[stdout]` / `[stderr]` string | Azure two-element `ComponentStatus/StdOut/succeeded` |
 | **Timeout Handling** | Native `timeout <sec> bash -c ...` | `Start-Process` with process tree kill (`taskkill /T /F`) |
-| **Example Directory** | `examples/hip-compliance/` | `examples/windows-baseline/` |
+| **Example Directory** | `examples/linux/` | `examples/windows/` |
 | **Golden Test File** | `tests/golden/hip_compliance_remote.sh` | `tests/golden/windows_baseline_remote.ps1` |
 
 ### Key Highlights
 - **Fire-and-Forget Two-Phase Execution**: In Phase 1 (Invoke), remote scripts are fired asynchronously with one runCommand POST per VM (`az rest`, which returns on `202 Accepted` without waiting for the script). In Phase 2 (Collect), the host collects results via reader scripts on an event scheduler. Workers are never held blocked waiting for remote scripts to complete.
-- **Host-Side Prechecks with Subscription Caching**: Verify tenant subscriptions or VM power states before running commands; memoize checks per subscription (`cache: subscription`) to prevent redundant queries. Non-target/skipped VMs never enter the collect phase.
-- **Zero-Corruption Concurrency (Part Files & Merge)**: Workers write exclusively to per-VM part files (`NNNN-<vm_name>.csv` / `.log`). A single-threaded merge step builds `result.csv` and `result.log` in original input order after all workers complete.
+- **Root Prechecks (`pre_run`) with Phase Filtering**: Host-side checks run at root `pre_run` with `phase: ["invoke"]`, `["collect"]`, or `["invoke", "collect"]`. Catch power drift before reading results; memoize checks per subscription (`cache: subscription`) to prevent redundant queries. (Legacy `invoke.precheck` remains fully supported).
+- **Post-Run Hooks & Power Management**: Root `post_run` hooks run per collected VM before power actions, passing `$Y2_OUTCOME`, `$Y2_RUN_ID`, `$Y2_ACTIONS`, and `$Y2_PREV_POWER_STATE`. Power management (`actions: skip | start | start-stop | stop`) restores original VM states (`start-stop`) or deallocates target VMs (`stop`), backed by atomic `.power` state files and interactive safety confirmation banners.
+- **Zero-Corruption Concurrency (Part Files & Merge)**: Workers write exclusively to per-VM part files (`NNNN-<vm_name>.csv` / `.log` / `.power`). A single-threaded merge step builds `result.csv` and `result.log` in original input order after all workers complete.
 - **Resilient & Resumable**: Safely resume interrupted runs (`--resume`) without repeating work on finished VMs. Built-in auth circuit breaker, exponential backoff with jitter on Azure throttling, and conflict retries.
 - **Safe Evaluation**: Remote values are stored base64-encoded to prevent shell injection, and computed columns run isolated on the host with exported environment variables.
 
@@ -91,52 +92,52 @@ Both `y2b` and `y2p` share identical subcommands and flags.
 ### Validate Configuration & Input CSV
 ```bash
 # Linux job validation
-y2b validate examples/hip-compliance/job.yaml
+y2b validate examples/linux/job.yaml
 
 # Windows job validation
-y2p validate examples/windows-baseline/job.yaml
+y2p validate examples/windows/job.yaml
 ```
 Checks YAML schema integrity, validates script paths and syntax, inspects the CSV header and VM rows (verifies correct OS family, prevents cross-tool mismatch).
 
 ### Compile Remote Payload
 ```bash
 # Preview the remote payload
-y2b compile examples/hip-compliance/job.yaml
-y2p compile examples/windows-baseline/job.yaml
+y2b compile examples/linux/job.yaml
+y2p compile examples/windows/job.yaml
 
 # Save to file
-y2b compile examples/hip-compliance/job.yaml -o remote.sh
-y2p compile examples/windows-baseline/job.yaml -o remote.ps1
+y2b compile examples/linux/job.yaml -o remote.sh
+y2p compile examples/windows/job.yaml -o remote.ps1
 ```
 
 ### Execute Run
 ```bash
 # Full execution across all target VMs
-y2b run examples/hip-compliance/job.yaml
-y2p run examples/windows-baseline/job.yaml
+y2b run examples/linux/job.yaml
+y2p run examples/windows/job.yaml
 
 # Filter by VM name and concurrency
-y2b run examples/hip-compliance/job.yaml --vm vm-app-01 --vm vm-app-02 --parallel 20 --yes
+y2b run examples/linux/job.yaml --vm lin01 --vm lin02 --parallel 20 --yes
 
 # Limit to first N VMs
-y2p run examples/windows-baseline/job.yaml --limit 10
+y2p run examples/windows/job.yaml --limit 10
 
 # Dry run (run prechecks, compile payload, skip run-command)
-y2b run examples/hip-compliance/job.yaml --dry-run
-y2p run examples/windows-baseline/job.yaml --dry-run
+y2b run examples/linux/job.yaml --dry-run
+y2p run examples/windows/job.yaml --dry-run
 
 # Resume an interrupted run
-y2b run examples/hip-compliance/job.yaml --resume
-y2p run examples/windows-baseline/job.yaml --resume
+y2b run examples/linux/job.yaml --resume
+y2p run examples/windows/job.yaml --resume
 
 # Keep per-VM part files for debugging
-y2b run examples/hip-compliance/job.yaml --keep-parts
+y2b run examples/linux/job.yaml --keep-parts
 ```
 
 ### Exit Codes
-- `0`: All VMs completed successfully (`OK`).
+- `0`: All VMs completed successfully (`OK`), post hooks passed, power actions completed.
 - `1`: Configuration, YAML schema, or input CSV validation error.
-- `2`: Run finished, but some VMs had non-OK outcomes (`SKIPPED`, `ENDED`, or `ERROR`).
+- `2`: Run finished, but some VMs had non-OK outcomes (`SKIPPED`, `ENDED`, or `ERROR`), post hooks / power actions failed, or VMs were left held/running remotely.
 - `3`: Run aborted (Ctrl-C, 5 consecutive authentication failures, or merge error).
 
 ---
@@ -148,6 +149,7 @@ y2b run examples/hip-compliance/job.yaml --keep-parts
 | `OK` | Prechecks, dispatch, and collection succeeded | Normal report row |
 | `SKIPPED:<precheck>` | VM stopped by precheck with action `skip` | Passthrough columns kept, other columns marked `SKIPPED:...` |
 | `ENDED:<precheck>` | VM stopped by precheck with action `end_check` | Passthrough columns kept, other columns marked `ENDED:...` |
+| `ERROR:not_running_at_collect:<precheck>` | VM stopped or deallocated before collect read under `skip`/`stop` policy | Immediate error recorded; prevents futile reader retries |
 | `ERROR:still_running` | The VM was still busy after the sleep and every collect retry | Retried up to `collect_retries` times; parts folder preserved, can be read later with `--resume` |
 | `ERROR:remote_incomplete` | The script started but did not write the done marker | Script killed, VM rebooted, or exceeded Azure's 90-minute cap |
 | `ERROR:stale_result` | `$RES_FILE` belongs to another run | Logged, no retry |

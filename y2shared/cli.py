@@ -47,9 +47,15 @@ def cmd_validate(args: argparse.Namespace, profile: Profile) -> int:
     print(f"\nValidation successful!")
     print(f"  Job: {yaml_path.name} (SHA256: {job.job_hash[:12]}...)")
     print(f"  Target VMs: {len(rows)} from {job.input.name}")
-    print(f"  Prechecks: {len(job.invoke.precheck)}")
+    phases_count = {"invoke": 0, "collect": 0}
+    for p in job.pre_run:
+        for ph in p.phases:
+            if ph in phases_count:
+                phases_count[ph] += 1
+    print(f"  Pre_run checks: {len(job.pre_run)} (invoke: {phases_count['invoke']}, collect: {phases_count['collect']})")
     print(f"  Runcommand steps: {len(job.invoke.runcommand.steps)}")
     print(f"  Collect columns: {len(job.collect)}")
+    print(f"  Post_run hooks: {len(job.post_run)}")
     return 0
 
 

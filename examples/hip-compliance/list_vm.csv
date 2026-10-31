@@ -1,4 +1,0 @@
-vm_name,resource_group,subscription,os
-vm-app-01,rg-prod-eastus,sub-prod-01,rhel8
-vm-app-02,rg-prod-eastus,sub-prod-01,rhel8
-

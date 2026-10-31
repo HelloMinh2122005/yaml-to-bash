@@ -44,7 +44,11 @@ from y2shared.parts import (
     is_part_finished,
     is_part_still_running,
     write_part_files,
+    power_path,
+    write_power_once,
+    read_power,
 )
+from y2shared.post import run_post_phase, PostPhaseResult
 from y2shared.precheck import PrecheckEngine
 from y2shared.profile import Profile
 from y2shared.scan import build_var_to_step_map
@@ -112,6 +116,7 @@ def run_collect_phase(
     sleep_fn: Callable[[float], None] = time.sleep,
     read_fn: Callable[..., ReadResult] | None = None,
     var_to_step: dict[str, int] | None = None,
+    precheck_engine: PrecheckEngine | None = None,
 ) -> None:
     """
     Phase 2 Collect scheduler running on min-heap.
@@ -143,6 +148,24 @@ def run_collect_phase(
         rec: dict[str, Any],
     ) -> tuple[VMRow, ReadResult, VMLogger]:
         logger = VMLogger.from_lines(r.vm_name, r.index, rec.get("log", []))
+        if precheck_engine:
+            def on_power(prev_state: str, started: bool) -> None:
+                p_path = power_path(parts_dir, r, total_rows)
+                now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                data = {
+                    "prev_state": prev_state,
+                    "started_by_run": started,
+                    "post": "pending",
+                    "at": now_iso,
+                }
+                write_power_once(p_path, data)
+
+            proceed, marker = precheck_engine.run_prechecks_for_vm(
+                job, r, logger, phase="collect", on_power=on_power if job.stops_after else None
+            )
+            if not proceed:
+                return r, ReadResult(status="ERROR", error=marker), logger
+
         res = actual_read_fn(
             row=r,
             collect_script_path=collect_script_path,
@@ -202,9 +225,28 @@ def run_collect_phase(
                             rec["log"] = list(logger.lines)
                             heapq.heappush(heap, (next_ready, next(seq_gen), r, rec, retries + 1))
                         else:
-                            # Retries exhausted -> ERROR:still_running
-                            logger.finalize("ERROR:still_running")
-                            row_vals = collect_for_vm(job, r, outcome_marker="ERROR:still_running", logger=logger, var_to_step=var_to_step)
+                            # Retries exhausted -> run collect-phase checks once more before ERROR:still_running (§4.5)
+                            marker = "ERROR:still_running"
+                            if precheck_engine:
+                                def on_power(prev_state: str, started: bool) -> None:
+                                    p_path = power_path(parts_dir, r, total_rows)
+                                    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                                    data = {
+                                        "prev_state": prev_state,
+                                        "started_by_run": started,
+                                        "post": "pending",
+                                        "at": now_iso,
+                                    }
+                                    write_power_once(p_path, data)
+
+                                proceed, c_marker = precheck_engine.run_prechecks_for_vm(
+                                    job, r, logger, phase="collect", on_power=on_power if job.stops_after else None
+                                )
+                                if not proceed and c_marker:
+                                    marker = c_marker
+
+                            logger.finalize(marker)
+                            row_vals = collect_for_vm(job, r, outcome_marker=marker, logger=logger, var_to_step=var_to_step)
                             write_part_files(parts_dir, r, total_rows, row_vals, logger)
                             run_state.update("ERROR")
                     else:
@@ -355,7 +397,12 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
     print(f"  Collect retries:        {job.collect_retries}")
     print(f"  Output CSV:             {job.output_csv}")
     print(f"  Output Log:             {job.output_log}")
+    if job.stops_after:
+        print(f"  Power policy:           {job.actions} — after the job, deallocates up to {len(target_rows)} VMs, INCLUDING VMs that are running now")
     print(f"==================================================\n")
+
+    if job.stops_after:
+        print(f"Power policy: {job.actions} — after the job, deallocates up to {len(target_rows)} VMs, INCLUDING VMs that are running now\n")
 
     if not args.yes and sys.stdin.isatty():
         try:
@@ -371,6 +418,7 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
     run_state = RunState(total_vms=len(target_rows), start_time=time.time())
     circuit_breaker = AuthCircuitBreaker(threshold=5)
     precheck_engine = PrecheckEngine()
+    post_result: PostPhaseResult | None = None
 
     ctrl_c_count = 0
     interrupted_event = threading.Event()
@@ -423,7 +471,20 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
 
                 try:
                     # 1. Precheck
-                    proceed, precheck_marker = precheck_engine.run_prechecks_for_vm(job, row, logger)
+                    def on_power(prev_state: str, started: bool) -> None:
+                        p_path = power_path(parts_dir, row, len(target_rows))
+                        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                        data = {
+                            "prev_state": prev_state,
+                            "started_by_run": started,
+                            "post": "pending",
+                            "at": now_iso,
+                        }
+                        write_power_once(p_path, data)
+
+                    proceed, precheck_marker = precheck_engine.run_prechecks_for_vm(
+                        job, row, logger, phase="invoke", on_power=on_power if job.stops_after else None
+                    )
                     if not proceed:
                         row_vals = collect_for_vm(job, row, outcome_marker=precheck_marker, logger=logger, var_to_step=var_to_step)
                         logger.finalize(precheck_marker or "SKIPPED")
@@ -431,6 +492,9 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
                         outcome_type = "SKIPPED" if "SKIPPED:" in (precheck_marker or "") else "ENDED"
                         run_state.update(outcome_type)
                         return
+
+                    if job.stops_after:
+                        on_power("PowerState/running", False)
 
                     # 2. Dry run
                     if args.dry_run:
@@ -572,6 +636,7 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
                     interrupted_event=interrupted_event,
                     read_fn=bound_read_results,
                     var_to_step=var_to_step,
+                    precheck_engine=precheck_engine,
                 )
 
         # Check circuit breaker & Ctrl-C after Phase 2
@@ -587,6 +652,22 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
             print(f"Rerun with: {profile.tool} run {job.yaml_path} --resume", file=sys.stderr)
             return 3
 
+        # ==============================================================================
+        # 10.5 Phase 3 — Post (R2, R3, R4)
+        # ==============================================================================
+        update_run_phase(parts_dir, "post")
+        all_collect_records = collect_list.load(target_rows)
+        post_result = run_post_phase(
+            job=job,
+            target_rows=target_rows,
+            collect_records=all_collect_records,
+            parts_dir=parts_dir,
+            run_id=run_id,
+            parallel=parallel,
+            circuit_breaker=circuit_breaker,
+            dry_run=args.dry_run,
+        )
+
     finally:
         stop_caffeinate(caffeinate_proc)
         signal.signal(signal.SIGINT, original_sigint)
@@ -598,8 +679,13 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
         is_part_still_running(parts_dir, r, len(target_rows))
         for r in target_rows
     )
+    has_pending_post = any(
+        (p := read_power(power_path(parts_dir, r, len(target_rows)))) is not None
+        and p.get("post") != "done"
+        for r in target_rows
+    )
 
-    keep_parts = args.keep_parts or has_still_running
+    keep_parts = args.keep_parts or has_still_running or has_pending_post
 
     print("Merging VM part files...")
     try:
@@ -623,17 +709,35 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
     print(f"  Skipped:     {counts.get('SKIPPED', 0)}")
     print(f"  Ended:       {counts.get('ENDED', 0)}")
     print(f"  Error:       {counts.get('ERROR', 0)}")
+    if post_result and (post_result.hooks_ok > 0 or post_result.hooks_failed > 0 or job.post_run):
+        print(f"  Post hooks:  ok {post_result.hooks_ok} · failed {post_result.hooks_failed}")
+    if post_result and (post_result.deallocated > 0 or post_result.powered_off > 0 or job.stops_after):
+        print(f"  Deallocated: {post_result.deallocated}")
+        print(f"  Powered off: {post_result.powered_off}")
+
+    still_running_vms = [r for r in target_rows if is_part_still_running(parts_dir, r, len(target_rows))]
+    if still_running_vms:
+        names = ", ".join(r.vm_name for r in still_running_vms)
+        print(f"  Left running: {len(still_running_vms)} ({names}, rerun with {profile.tool} run {job.yaml_path} --resume)")
+
     print(f"  Output CSV:  {job.output_csv}")
     print(f"  Output Log:  {job.output_log}")
 
-    if has_still_running:
+    if still_running_vms:
         print(f"\n[!] Notice: Some VMs were still running remotely when collection timed out.")
         print(f"    Part files preserved in: {parts_dir}")
         print(f"    Rerun later to read remaining VMs: {profile.tool} run {job.yaml_path} --resume")
 
     print("==================================================")
 
-    if counts.get("SKIPPED", 0) > 0 or counts.get("ENDED", 0) > 0 or counts.get("ERROR", 0) > 0:
+    if (
+        counts.get("SKIPPED", 0) > 0
+        or counts.get("ENDED", 0) > 0
+        or counts.get("ERROR", 0) > 0
+        or (post_result and post_result.hooks_failed > 0)
+        or (post_result and post_result.power_failed > 0)
+        or bool(still_running_vms)
+    ):
         return 2
 
     return 0

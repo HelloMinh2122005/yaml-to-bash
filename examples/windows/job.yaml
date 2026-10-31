@@ -1,0 +1,173 @@
+# ==============================================================================
+# Windows Fleet Baseline Job Specification (y2p)
+# ==============================================================================
+input: "./list_vm.csv"             # Target inventory CSV
+output_log: "./result.log"         # Consolidated execution log
+output_csv: "./result.csv"         # Final aggregated CSV report
+actions: "start-stop"              # Power policy: "skip" | "start" | "start-stop" | "stop"
+parallel: 5                        # Concurrent VM workers
+
+# Fire-and-forget collect timings
+sleep_before_collect: "20s"        # Wait between invoke and first collect attempt
+collect_retry_interval: "15s"      # Wait interval before retrying a still-running VM
+collect_retries: 3                 # Maximum collection retries before marking still_running
+
+# ==============================================================================
+# Host Pre-flight Checks (pre_run)
+# ==============================================================================
+pre_run:
+  - name: "check-if-subscription-in-tenant"
+    phase: ["invoke"]
+    cache: "subscription"        # Query once per subscription; results cached across threads
+    script: |
+      az account show --subscription "$SUBSCRIPTION" > /dev/null 2>&1
+      if [ $? -eq 0 ]; then
+        echo 0
+      else
+        echo 1
+      fi
+    result:
+      0:
+        log: "Subscription verified in tenant"
+        action: "continue"
+      1:
+        log: "Subscription not found in tenant - skipping VM"
+        action: "end_check"
+
+  - name: "check-if-vm-is-running"
+    phase: ["invoke", "collect"]   # Evaluated in Phase 1 AND before Phase 2 collect read
+    script: |
+      az vm get-instance-view --subscription "$SUBSCRIPTION" -g "$RESOURCE_GROUP" -n "$VM_NAME" \
+        --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code" -o tsv
+    result:
+      "PowerState/running":
+        log: "VM is running"
+        action: "continue"
+      "PowerState/deallocated":
+        log: "VM is deallocated"
+        action: "skip"            # Handled according to root 'actions' policy
+      "PowerState/stopped":
+        log: "VM is stopped"
+        action: "skip"
+      default:
+        log: "VM is not running"
+        action: "skip"
+
+# ==============================================================================
+# Pipeline 1: Remote Execution Payload (y2p RunPowerShellScript)
+# ==============================================================================
+invoke:
+  runcommand:
+    res_file: 'C:\ProgramData\y2p\result.res'
+    log_file: 'C:\ProgramData\y2p\result.log'
+    steps:
+      - name: "check-defender"
+        timeout: 60
+        script: |
+          # Query Windows Defender status and signatures
+          $s = Get-MpComputerStatus
+          write_result DEFENDER_ENABLED "$($s.AntivirusEnabled)"
+          write_result SIGNATURE_AGE_DAYS "$($s.AntivirusSignatureAge)"
+          write_result REALTIME_ENABLED "$($s.RealTimeProtectionEnabled)"
+
+      - name: "check-hotfix"
+        timeout: 90
+        script: |
+          # Query installed hotfixes and latest KB article
+          $hfs = @(Get-HotFix -ErrorAction SilentlyContinue | Sort-Object InstalledOn)
+          if ($hfs.Count -gt 0) {
+            $latest = $hfs[-1]
+            write_result LAST_HOTFIX "$($latest.HotFixID)"
+            write_result KB_VERSION "$($latest.HotFixID)"
+            $instDate = if ($latest.InstalledOn) { (Get-Date $latest.InstalledOn -Format "yyyy-MM-dd") } else { "UNKNOWN" }
+            write_result LAST_KB_DATE "$instDate"
+            write_result HOTFIX_COUNT "$($hfs.Count)"
+          } else {
+            write_result LAST_HOTFIX "NONE"
+            write_result KB_VERSION "NONE"
+            write_result LAST_KB_DATE "NONE"
+            write_result HOTFIX_COUNT "0"
+          }
+
+      - name: "check-os-build"
+        timeout: 60
+        script: |
+          # Query Windows NT kernel version, build and edition
+          $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+          $build = "$($cv.CurrentBuild)"
+          $ubr = if ($cv.UBR) { "$($cv.UBR)" } else { "0" }
+          $kernel = "$build.$ubr"
+          write_result OS_BUILD "$build"
+          write_result KERNEL_VERSION "$kernel"
+          write_result OS_NAME "$($cv.ProductName)"
+
+      - name: "tls-settings"
+        timeout: 60
+        script_path: "./scripts/check_tls.ps1"
+
+# ==============================================================================
+# Pipeline 2: Collect & Transform (CSV Column Mapping)
+# ==============================================================================
+collect:
+  # 1. Passthrough Columns (from input inventory CSV)
+  - column: "vm_name"
+    source: "input.vm_name"
+
+  - column: "resource_group"
+    source: "input.resource_group"
+
+  - column: "subscription"
+    source: "input.subscription"
+
+  - column: "os_target"
+    source: "input.os"
+
+  # 2. Remote Variable Columns (from res_file on VM)
+  - column: "os_name"
+    var: "OS_NAME"
+
+  - column: "os_build"
+    var: "OS_BUILD"
+
+  - column: "kernel_version"
+    var: "KERNEL_VERSION"
+
+  - column: "defender_enabled"
+    var: "DEFENDER_ENABLED"
+
+  - column: "realtime_enabled"
+    var: "REALTIME_ENABLED"
+
+  - column: "signature_age"
+    var: "SIGNATURE_AGE_DAYS"
+
+  - column: "last_hotfix"
+    var: "LAST_HOTFIX"
+
+  - column: "hotfix_count"
+    var: "HOTFIX_COUNT"
+
+  - column: "tls12_enabled"
+    var: "TLS12_ENABLED"
+
+  # 3. Computed Columns (Evaluated with host bash)
+  - column: "verdict"
+    script: |
+      if [ "$DEFENDER_ENABLED" = "True" ] && [ "$TLS12_ENABLED" != "0" ]; then
+        echo "COMPLIANT"
+      else
+        echo "NON_COMPLIANT"
+      fi
+
+# ==============================================================================
+# Pipeline 3: Post-Run Hooks & Power Actions
+# ==============================================================================
+post_run:
+  - name: "log-audit-summary"
+    timeout: 30
+    script: |
+      echo "[audit] Windows VM $VM_NAME ($RESOURCE_GROUP): outcome=$Y2_OUTCOME, prev_power=$Y2_PREV_POWER_STATE, action=$Y2_ACTIONS, run_id=$Y2_RUN_ID"
+      echo ok
+    result:
+      ok:
+        log: "Audit summary recorded"

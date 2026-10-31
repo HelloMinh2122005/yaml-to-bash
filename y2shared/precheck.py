@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shlex
 import threading
-from typing import Any
+from typing import Any, Callable
 
 from y2shared.config import Job, Precheck
 from y2shared.inputcsv import VMRow
@@ -40,15 +40,21 @@ class PrecheckEngine:
         job: Job,
         row: VMRow,
         logger: VMLogger,
+        phase: str = "invoke",
+        on_power: Callable[[str, bool], None] | None = None,
     ) -> tuple[bool, str | None]:
         """
-        Run all prechecks for a single VM in YAML order.
+        Run all prechecks matching phase for a single VM in YAML order.
         Returns:
             (proceed, outcome_marker)
             If proceed is True, outcome_marker is None.
             If proceed is False, outcome_marker is SKIPPED:..., ENDED:..., or ERROR:...
         """
-        for precheck in job.invoke.precheck:
+        prechecks = job.pre_run if job.pre_run else (job.invoke.precheck if job.invoke else [])
+        for precheck in prechecks:
+            if phase not in precheck.phases:
+                continue
+
             # Check subscription cache (A6)
             if precheck.cache == "subscription":
                 cache_key = (precheck.name, row.subscription)
@@ -90,10 +96,18 @@ class PrecheckEngine:
             elif action == "end_check":
                 return False, f"ENDED:{precheck.name}"
             elif action == "skip":
-                if job.actions == "start":
-                    # Root action start policy (D6)
+                if job.starts_vms:
+                    # Root action start policy (start / start-stop)
+                    if on_power:
+                        from y2shared.dispatcher import get_power_state
+
+                        prev_state, _ = get_power_state(row, logger=logger)
+                        if not prev_state:
+                            prev_state = "PowerState/deallocated"
+                        on_power(prev_state, True)
+
                     logger.log(
-                        f"actions: start policy triggered for {row.vm_name} (RG: {row.resource_group}). Running az vm start..."
+                        f"actions: {job.actions} policy triggered for {row.vm_name} (RG: {row.resource_group}). Running az vm start..."
                     )
                     start_cmd = (
                         f"az vm start --subscription {shlex.quote(row.subscription)} "
@@ -126,7 +140,10 @@ class PrecheckEngine:
                     else:
                         return False, f"ERROR:start_failed:{precheck.name}"
                 else:
-                    return False, f"SKIPPED:{precheck.name}"
+                    if phase == "collect":
+                        return False, f"ERROR:not_running_at_collect:{precheck.name}"
+                    else:
+                        return False, f"SKIPPED:{precheck.name}"
             else:
                 logger.log_error(f"Unknown action '{action}' for precheck '{precheck.name}'")
                 return False, f"ERROR:precheck_unknown_action:{action}"

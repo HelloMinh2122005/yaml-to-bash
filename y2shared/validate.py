@@ -77,8 +77,8 @@ def validate_job_dict(
     # actions
     if "actions" in raw:
         actions = str(raw["actions"])
-        if actions not in ("skip", "start"):
-            err("actions", f"Invalid actions policy '{actions}'; must be 'skip' or 'start'")
+        if actions not in ("skip", "start", "start-stop", "stop"):
+            err("actions", f"Invalid actions policy '{actions}'; must be 'skip', 'start', 'start-stop', or 'stop'")
 
     # parallel
     if "parallel" in raw:
@@ -127,15 +127,34 @@ def validate_job_dict(
         err("invoke", "Missing required 'invoke' mapping")
         return ValidationResult(errors, warnings)
 
-    # invoke.precheck
-    prechecks = invoke.get("precheck")
+    # pre_run vs invoke.precheck
+    has_pre_run = "pre_run" in raw
+    has_invoke_precheck = "precheck" in invoke
+
+    if has_pre_run and has_invoke_precheck:
+        err("pre_run", "Cannot define both root 'pre_run' and 'invoke.precheck'")
+
+    if has_invoke_precheck and not has_pre_run:
+        warn("invoke.precheck", "invoke.precheck is deprecated, use root pre_run")
+
+    if has_pre_run:
+        prechecks = raw.get("pre_run")
+        p_prefix = "pre_run"
+    elif has_invoke_precheck:
+        prechecks = invoke.get("precheck")
+        p_prefix = "invoke.precheck"
+    else:
+        prechecks = None
+        p_prefix = "pre_run"
+
+    has_skip_action = False
     if prechecks is not None:
         if not isinstance(prechecks, list):
-            err("invoke.precheck", "'precheck' must be a list")
+            err(p_prefix, f"'{p_prefix}' must be a list")
         else:
             seen_precheck_names: set[str] = set()
             for i, p in enumerate(prechecks):
-                p_path = f"invoke.precheck[{i}]"
+                p_path = f"{p_prefix}[{i}]"
                 if not isinstance(p, dict):
                     err(p_path, "Precheck item must be a mapping")
                     continue
@@ -147,6 +166,26 @@ def validate_job_dict(
                     if name in seen_precheck_names:
                         err(f"{p_path}.name", f"Duplicate precheck name '{name}'")
                     seen_precheck_names.add(name)
+
+                # phase validation
+                if "phase" in p or "phases" in p:
+                    ph_val = p.get("phase") if "phase" in p else p.get("phases")
+                    if isinstance(ph_val, str):
+                        ph_list = [ph_val]
+                    elif isinstance(ph_val, list):
+                        ph_list = ph_val
+                    else:
+                        ph_list = None
+
+                    if (
+                        ph_list is None
+                        or len(ph_list) == 0
+                        or not all(isinstance(x, str) and x in ("invoke", "collect") for x in ph_list)
+                    ):
+                        err(
+                            f"{p_path}.phase",
+                            f"Invalid phase '{ph_val}'; must be a non-empty subset of ['invoke', 'collect']",
+                        )
 
                 has_script = "script" in p and p["script"] is not None
                 has_script_path = "script_path" in p and p["script_path"] is not None
@@ -188,6 +227,11 @@ def validate_job_dict(
                         action_val = r_spec.get("action")
                         if action_val not in ("continue", "skip", "end_check"):
                             err(f"{res_p}.action", f"Invalid action '{action_val}'; must be 'continue', 'skip', or 'end_check'")
+                        if action_val == "skip":
+                            has_skip_action = True
+
+    if raw.get("actions") in ("stop", "start-stop") and not has_skip_action:
+        warn("actions", f"actions policy is '{raw.get('actions')}' but no pre_run check defines 'action: skip'")
 
     # invoke.runcommand
     rc = invoke.get("runcommand")
@@ -196,6 +240,11 @@ def validate_job_dict(
         err("invoke.runcommand", "Missing required 'runcommand' mapping under 'invoke'")
     else:
         profile.validate_runcommand(rc, yaml_dir, reporter)
+
+        if profile.os_family == "linux":
+            res_file = str(rc.get("res_file", ""))
+            if res_file.startswith("/tmp/") or res_file == "/tmp":
+                warn("invoke.runcommand.res_file", "res_file under /tmp may not survive a reboot or VM restart; consider /var/tmp")
 
         steps = rc.get("steps")
         if not isinstance(steps, list) or len(steps) == 0:
@@ -325,6 +374,61 @@ def validate_job_dict(
                 t = c["timeout"]
                 if not isinstance(t, int) or isinstance(t, bool) or t <= 0:
                     err(f"{c_path}.timeout", f"Invalid timeout '{t}'; must be a positive integer")
+
+    # post_run section
+    if "post_run" in raw:
+        post_run = raw.get("post_run")
+        if not isinstance(post_run, list):
+            err("post_run", "'post_run' must be a list")
+        else:
+            seen_post_names: set[str] = set()
+            for i, p in enumerate(post_run):
+                p_path = f"post_run[{i}]"
+                if not isinstance(p, dict):
+                    err(p_path, "Post-run item must be a mapping")
+                    continue
+
+                name = p.get("name")
+                if not name or not isinstance(name, str):
+                    err(f"{p_path}.name", "Post-run hook must have a non-empty 'name'")
+                else:
+                    if name in seen_post_names:
+                        err(f"{p_path}.name", f"Duplicate post_run name '{name}'")
+                    seen_post_names.add(name)
+
+                has_script = "script" in p and p["script"] is not None
+                has_script_path = "script_path" in p and p["script_path"] is not None
+                if (has_script and has_script_path) or (not has_script and not has_script_path):
+                    err(p_path, "Post-run hook must define exactly one of 'script' or 'script_path'")
+
+                if has_script_path:
+                    sp = str(p["script_path"])
+                    resolved = resolve_path(sp)
+                    if not resolved or not resolved.is_file():
+                        err(f"{p_path}.script_path", f"Script file not found or not readable: '{sp}'")
+
+                if "timeout" in p:
+                    t = p["timeout"]
+                    if not isinstance(t, int) or isinstance(t, bool) or t <= 0:
+                        err(f"{p_path}.timeout", f"Invalid timeout '{t}'; must be a positive integer")
+
+                if "result" in p:
+                    res_raw = p["result"]
+                    if not isinstance(res_raw, dict):
+                        err(f"{p_path}.result", "'result' must be a mapping")
+                    else:
+                        for r_key, r_spec in res_raw.items():
+                            r_p = f"{p_path}.result[{r_key}]"
+                            if not isinstance(r_spec, dict):
+                                err(r_p, "Result entry must be a mapping")
+                                continue
+                            for k, v in r_spec.items():
+                                if k not in ("log", "status"):
+                                    err(f"{r_p}.{k}", f"Invalid key '{k}' in post_run result; only 'log' and 'status' allowed")
+                            if "log" in r_spec and not isinstance(r_spec["log"], str):
+                                err(f"{r_p}.log", "'log' must be a string")
+                            if "status" in r_spec and r_spec["status"] not in ("ok", "error"):
+                                err(f"{r_p}.status", f"Invalid status '{r_spec['status']}'; must be 'ok' or 'error'")
 
     return ValidationResult(errors=errors, warnings=warnings)
 

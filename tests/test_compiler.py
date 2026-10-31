@@ -12,7 +12,7 @@ from y2b.compiler import compile_job, compile_collect_script
 
 
 def test_golden_file_matches():
-    job_path = Path("examples/hip-compliance/job.yaml")
+    job_path = Path("examples/linux/job.yaml")
     job = load_job(job_path)
     compiled, errors = compile_job(job)
     assert not errors
@@ -23,7 +23,7 @@ def test_golden_file_matches():
 
 
 def test_bash_n_syntax_check():
-    job_path = Path("examples/hip-compliance/job.yaml")
+    job_path = Path("examples/linux/job.yaml")
     job = load_job(job_path)
     compiled, errors = compile_job(job)
     assert not errors
@@ -33,7 +33,7 @@ def test_bash_n_syntax_check():
 
 
 def test_syntax_error_reported():
-    job = load_job("examples/hip-compliance/job.yaml")
+    job = load_job("examples/linux/job.yaml")
     # Introduce syntax error in step
     job.invoke.runcommand.steps[0].script = "if [ 1 -eq 1 ]; then echo missing fi"
     compiled, errors = compile_job(job)
@@ -42,15 +42,15 @@ def test_syntax_error_reported():
 
 
 def test_empty_step_produces_valid_bash():
-    job = load_job("examples/hip-compliance/job.yaml")
+    job = load_job("examples/linux/job.yaml")
     job.invoke.runcommand.steps[0].script = "# Only comments\n\n# More comments"
     compiled, errors = compile_job(job)
     assert not errors
-    assert "y2b_step_1() {            # check-hip-version\n  # Only comments\n\n  # More comments\n  :\n}" in compiled
+    assert "y2b_step_1() {            # check-os-release\n  # Only comments\n\n  # More comments\n  :\n}" in compiled
 
 
 def test_compiler_run_id_and_no_result_echo():
-    job = load_job("examples/hip-compliance/job.yaml")
+    job = load_job("examples/linux/job.yaml")
     compiled, errors = compile_job(job, run_id="20261029T100000Z-1234abcd")
     assert not errors
     assert "Y2B_RUN_ID=20261029T100000Z-1234abcd" in compiled

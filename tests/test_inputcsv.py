@@ -23,15 +23,16 @@ def test_is_linux_os():
 
 
 def test_valid_example_csv():
-    job = load_job("examples/hip-compliance/job.yaml")
-    rows, headers, res = read_input_csv("examples/hip-compliance/list_vm.csv", job=job)
+    job = load_job("examples/linux/job.yaml")
+    rows, headers, res = read_input_csv("examples/linux/list_vm.csv", job=job)
     assert res.is_valid
-    assert len(rows) == 2
+    assert len(rows) == 3
     assert headers == ["vm_name", "resource_group", "subscription", "os"]
-    assert rows[0].vm_name == "vm-app-01"
-    assert rows[0].env["RESOURCE_GROUP"] == "rg-prod-eastus"
-    assert rows[0].part_prefix(width=4) == "0001-vm-app-01"
-    assert rows[1].part_prefix(width=4) == "0002-vm-app-02"
+    assert rows[0].vm_name == "lin01"
+    assert rows[0].env["RESOURCE_GROUP"] == "rg-lab-10vms"
+    assert rows[0].part_prefix(width=4) == "0001-lin01"
+    assert rows[1].part_prefix(width=4) == "0002-lin02"
+    assert rows[2].part_prefix(width=4) == "0003-lin03"
 
 
 def test_csv_missing_headers(tmp_path):
@@ -64,7 +65,7 @@ def test_csv_duplicate_vms(tmp_path):
 
 
 def test_csv_missing_collect_source_field(tmp_path):
-    job = load_job("examples/hip-compliance/job.yaml")
+    job = load_job("examples/linux/job.yaml")
     # CSV has required columns but is missing a column that collect expects if collect had input.custom_field
     csv_file = tmp_path / "test.csv"
     csv_file.write_text(

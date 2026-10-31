@@ -14,8 +14,8 @@ pipelines/
 ├── templates/
 │   ├── y2-setup.yml          # steps: venv + PATH
 │   └── y2-fleet-run.yml      # stages: Validate → Fleet (Invoke → Wait → Collect [→ Wait2 → Collect2])
-├── hip-compliance.yml        # y2b example consumer
-└── windows-baseline.yml      # y2p example consumer
+├── linux.yml                 # y2b example consumer
+└── windows.yml               # y2p example consumer
 ```
 
 ## 1. One-time ADO setup
@@ -266,7 +266,7 @@ Notes on the template:
 Use this today to prove the service connection, network path and permissions. It already does 2 run-commands per VM. The cost is an agent held during `sleep_before_collect`.
 
 ```yaml
-# pipelines/hip-compliance-l1.yml
+# pipelines/linux-l1.yml
 trigger: none
 pool:
   vmImage: ubuntu-latest
@@ -285,14 +285,14 @@ jobs:
           scriptLocation: inlineScript
           inlineScript: |
             set -uo pipefail
-            y2b run examples/hip-compliance/job.yaml -y
+            y2b run examples/linux/job.yaml -y
             rc=$?
             [ "$rc" -eq 2 ] && { echo "##vso[task.complete result=SucceededWithIssues;]"; rc=0; }
             exit "$rc"
-      - publish: examples/hip-compliance/result.csv
+      - publish: examples/linux/result.csv
         artifact: y2-result-csv
         condition: succeededOrFailed()
-      - publish: examples/hip-compliance/result.log
+      - publish: examples/linux/result.log
         artifact: y2-result-log
         condition: succeededOrFailed()
 ```
@@ -302,13 +302,13 @@ jobs:
 ### Linux fleet (`y2b`)
 
 ```yaml
-# pipelines/hip-compliance.yml
-name: hip-compliance-$(Date:yyyyMMdd)$(Rev:.r)
+# pipelines/linux.yml
+name: linux-$(Date:yyyyMMdd)$(Rev:.r)
 trigger: none
 lockBehavior: sequential
 schedules:
   - cron: "0 1 * * 1"                # Mondays 01:00 UTC
-    displayName: Weekly HIP compliance
+    displayName: Weekly Linux diagnostics
     branches: { include: [main] }
     always: true
 
@@ -322,10 +322,10 @@ extends:
   template: templates/y2-fleet-run.yml
   parameters:
     tool: y2b
-    jobFile: examples/hip-compliance/job.yaml
+    jobFile: examples/linux/job.yaml
     serviceConnection: sc-vm-fleet-prod
     environment: vm-fleet-prod
-    delayMinutes: 5                  # job.yaml: sleep_before_collect: "5m"
+    delayMinutes: 5                  # job.yaml: sleep_before_collect: "15s"
     recollectDelayMinutes: 15
     vmFilter: ${{ parameters.vmFilter }}
 ```
@@ -333,7 +333,7 @@ extends:
 ### Windows fleet (`y2p`)
 
 ```yaml
-# pipelines/windows-baseline.yml
+# pipelines/windows.yml
 trigger: none
 lockBehavior: sequential
 
@@ -341,10 +341,10 @@ extends:
   template: templates/y2-fleet-run.yml
   parameters:
     tool: y2p                        # → RunPowerShellScript; agent is still Linux
-    jobFile: examples/windows-baseline/job.yaml
+    jobFile: examples/windows/job.yaml
     serviceConnection: sc-vm-fleet-prod
     environment: vm-fleet-prod
-    delayMinutes: 3                  # job.yaml: sleep_before_collect: "3m"
+    delayMinutes: 3                  # job.yaml: sleep_before_collect: "20s"
 ```
 
 Using `extends:` (rather than `stages: - template:`) is what lets the **Required template** check enforce that every fleet run goes through this template.

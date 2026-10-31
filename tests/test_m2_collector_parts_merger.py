@@ -20,8 +20,8 @@ from y2shared.vmlog import VMLogger
 
 
 def test_collector_and_merger_spec_5_4(tmp_path):
-    """Verify that collecting and merging matches spec 5.4 exactly."""
-    job_path = Path("examples/hip-compliance/job.yaml")
+    """Verify that collecting and merging matches job specification."""
+    job_path = Path("examples/linux/job.yaml")
     job = load_job(job_path)
 
     # Use tmp_path for output files
@@ -29,13 +29,11 @@ def test_collector_and_merger_spec_5_4(tmp_path):
     job.output_log = tmp_path / "result.log"
 
     rows, _, _ = read_input_csv(job.input, job=job)
-    assert len(rows) == 2
+    assert len(rows) == 3
 
-    # Fixture RemoteResults matching spec 5.4
-    # vm-app-01: HIP_VERSION="22102026", KERNEL_COUNT="3" -> recommendation="Compliant", extended="OK"
-    res1 = RemoteResult(vars={"HIP_VERSION": "22102026", "KERNEL_COUNT": "3"})
-    # vm-app-02: HIP_VERSION="NOT_INSTALLED", KERNEL_COUNT="2" -> recommendation="Install HIP", extended="FAILED"
-    res2 = RemoteResult(vars={"HIP_VERSION": "NOT_INSTALLED", "KERNEL_COUNT": "2"})
+    res1 = RemoteResult(vars={"OS_NAME": "Red Hat Enterprise Linux", "OS_VERSION": "9.4", "KERNEL_VERSION": "5.14.0", "UPTIME_SECS": "1200", "LOAD_1M": "0.05", "ROOT_DISK_USAGE": "15%", "HW_AUDIT_STATUS": "PASS"})
+    res2 = RemoteResult(vars={"OS_NAME": "Red Hat Enterprise Linux", "OS_VERSION": "8.10", "KERNEL_VERSION": "4.18.0", "UPTIME_SECS": "2400", "LOAD_1M": "0.10", "ROOT_DISK_USAGE": "20%", "HW_AUDIT_STATUS": "PASS"})
+    res3 = RemoteResult(vars={"OS_NAME": "Oracle Linux Server", "OS_VERSION": "8.10", "KERNEL_VERSION": "5.15.0", "UPTIME_SECS": "3600", "LOAD_1M": "0.20", "ROOT_DISK_USAGE": "25%", "HW_AUDIT_STATUS": "FAIL"})
 
     parts_dir = get_parts_dir(job.output_csv)
     init_parts_dir(parts_dir, job, total_rows=len(rows), parallel=10)
@@ -43,24 +41,29 @@ def test_collector_and_merger_spec_5_4(tmp_path):
     # Process and write parts
     log1 = VMLogger(rows[0].vm_name, rows[0].index)
     vals1 = collect_for_vm(job, rows[0], remote_result=res1, logger=log1)
-    write_part_files(parts_dir, rows[0], total_rows=2, row_values=vals1, logger=log1)
+    write_part_files(parts_dir, rows[0], total_rows=3, row_values=vals1, logger=log1)
 
     log2 = VMLogger(rows[1].vm_name, rows[1].index)
     vals2 = collect_for_vm(job, rows[1], remote_result=res2, logger=log2)
-    write_part_files(parts_dir, rows[1], total_rows=2, row_values=vals2, logger=log2)
+    write_part_files(parts_dir, rows[1], total_rows=3, row_values=vals2, logger=log2)
+
+    log3 = VMLogger(rows[2].vm_name, rows[2].index)
+    vals3 = collect_for_vm(job, rows[2], remote_result=res3, logger=log3)
+    write_part_files(parts_dir, rows[2], total_rows=3, row_values=vals3, logger=log3)
 
     # Merge
     counts = merge_parts(job, rows, parts_dir, keep_parts=True)
-    assert counts["OK"] == 2
+    assert counts["OK"] == 3
 
     # Verify CSV content
     with open(job.output_csv, "r", encoding="utf-8") as f:
         reader = list(csv.reader(f))
 
-    expected_header = ["vm_name", "resource_group", "subscription", "os", "hip_version", "kernel_count", "recommendation", "extended_compliance"]
+    expected_header = ["vm_name", "resource_group", "subscription", "os_target", "os_name", "os_version", "kernel_version", "uptime_secs", "load_1m", "root_disk_usage", "hw_audit_status", "verdict"]
     assert reader[0] == expected_header
-    assert reader[1] == ["vm-app-01", "rg-prod-eastus", "sub-prod-01", "rhel8", "22102026", "3", "Compliant", "OK"]
-    assert reader[2] == ["vm-app-02", "rg-prod-eastus", "sub-prod-01", "rhel8", "NOT_INSTALLED", "2", "Install HIP", "FAILED"]
+    assert reader[1] == ["lin01", "rg-lab-10vms", rows[0].subscription, "rhel9", "Red Hat Enterprise Linux", "9.4", "5.14.0", "1200", "0.05", "15%", "PASS", "HEALTHY"]
+    assert reader[2] == ["lin02", "rg-lab-10vms", rows[1].subscription, "rhel8", "Red Hat Enterprise Linux", "8.10", "4.18.0", "2400", "0.10", "20%", "PASS", "HEALTHY"]
+    assert reader[3] == ["lin03", "rg-lab-10vms", rows[2].subscription, "ol8", "Oracle Linux Server", "8.10", "5.15.0", "3600", "0.20", "25%", "FAIL", "ATTENTION"]
 
 
 def test_tricky_values_and_computed_columns(tmp_path):
@@ -127,7 +130,7 @@ collect:
 
 def test_skipped_and_error_vm_outcome_markers(tmp_path):
     """Skipped or failed VMs must fill passthrough columns and outcome marker elsewhere."""
-    job_path = Path("examples/hip-compliance/job.yaml")
+    job_path = Path("examples/linux/job.yaml")
     job = load_job(job_path)
     job.output_csv = tmp_path / "result.csv"
     job.output_log = tmp_path / "result.log"
@@ -140,16 +143,16 @@ def test_skipped_and_error_vm_outcome_markers(tmp_path):
     vals2 = collect_for_vm(job, rows[1], outcome_marker="ERROR:run_command_timeout")
 
     # Verify passthrough columns
-    assert vals1[0:4] == ["vm-app-01", "rg-prod-eastus", "sub-prod-01", "rhel8"]
-    assert vals1[4:] == ["SKIPPED:check-if-vm-is-running"] * 4
+    assert vals1[0:4] == ["lin01", "rg-lab-10vms", rows[0].subscription, "rhel9"]
+    assert vals1[4:] == ["SKIPPED:check-if-vm-is-running"] * 8
 
-    assert vals2[0:4] == ["vm-app-02", "rg-prod-eastus", "sub-prod-01", "rhel8"]
-    assert vals2[4:] == ["ERROR:run_command_timeout"] * 4
+    assert vals2[0:4] == ["lin02", "rg-lab-10vms", rows[1].subscription, "rhel8"]
+    assert vals2[4:] == ["ERROR:run_command_timeout"] * 8
 
 
 def test_missing_part_synthesizes_error_no_result(tmp_path):
     """If a VM has no finished part, merger synthesizes ERROR:no_result row."""
-    job_path = Path("examples/hip-compliance/job.yaml")
+    job_path = Path("examples/linux/job.yaml")
     job = load_job(job_path)
     job.output_csv = tmp_path / "result.csv"
     job.output_log = tmp_path / "result.log"
@@ -158,31 +161,31 @@ def test_missing_part_synthesizes_error_no_result(tmp_path):
     parts_dir = get_parts_dir(job.output_csv)
     init_parts_dir(parts_dir, job, total_rows=len(rows), parallel=10)
 
-    # Only write part for VM 1; leave VM 2 missing
-    res1 = RemoteResult(vars={"HIP_VERSION": "22102026", "KERNEL_COUNT": "3"})
+    # Only write part for VM 1; leave VM 2 and 3 missing
+    res1 = RemoteResult(vars={"OS_NAME": "Red Hat Enterprise Linux", "OS_VERSION": "9.4", "KERNEL_VERSION": "5.14.0", "UPTIME_SECS": "1200", "LOAD_1M": "0.05", "ROOT_DISK_USAGE": "15%", "HW_AUDIT_STATUS": "PASS"})
     vals1 = collect_for_vm(job, rows[0], remote_result=res1)
     logger1 = VMLogger(rows[0].vm_name, rows[0].index)
-    write_part_files(parts_dir, rows[0], total_rows=2, row_values=vals1, logger=logger1)
+    write_part_files(parts_dir, rows[0], total_rows=3, row_values=vals1, logger=logger1)
 
     # Merge
     counts = merge_parts(job, rows, parts_dir, keep_parts=True)
     assert counts["OK"] == 1
-    assert counts["ERROR"] == 1
+    assert counts["ERROR"] == 2
 
     with open(job.output_csv, "r", encoding="utf-8") as f:
         reader = list(csv.reader(f))
 
-    assert len(reader) == 3  # Header + 2 data rows
-    assert reader[1][0] == "vm-app-01"
-    assert reader[2][0] == "vm-app-02"
-    assert reader[2][1] == "rg-prod-eastus"
+    assert len(reader) == 4  # Header + 3 data rows
+    assert reader[1][0] == "lin01"
+    assert reader[2][0] == "lin02"
+    assert reader[2][1] == "rg-lab-10vms"
     assert reader[2][4] == "ERROR:no_result"
-    assert reader[2][7] == "ERROR:no_result"
+    assert reader[2][11] == "ERROR:no_result"
 
 
 def test_tmp_part_is_ignored_and_treated_as_missing(tmp_path):
     """Leftover .tmp files must NOT be treated as finished."""
-    job_path = Path("examples/hip-compliance/job.yaml")
+    job_path = Path("examples/linux/job.yaml")
     job = load_job(job_path)
     job.output_csv = tmp_path / "result.csv"
     job.output_log = tmp_path / "result.log"
@@ -192,44 +195,51 @@ def test_tmp_part_is_ignored_and_treated_as_missing(tmp_path):
     init_parts_dir(parts_dir, job, total_rows=len(rows), parallel=10)
 
     # Write a .tmp file for VM 1 (simulating crashed worker)
-    csv_part, _ = get_part_paths(parts_dir, rows[0], total_rows=2)
+    csv_part, _ = get_part_paths(parts_dir, rows[0], total_rows=3)
     tmp_file = csv_part.with_suffix(".csv.tmp")
-    tmp_file.write_text("vm-app-01,rg-prod-eastus,sub-prod-01,rhel8,partial,row\n", encoding="utf-8")
+    tmp_file.write_text("lin01,rg-lab-10vms,sub,rhel9,partial,row\n", encoding="utf-8")
 
-    assert not is_part_finished(parts_dir, rows[0], total_rows=2)
+    assert not is_part_finished(parts_dir, rows[0], total_rows=3)
 
     counts = merge_parts(job, rows, parts_dir, keep_parts=True)
-    assert counts["ERROR"] == 2  # Both synthesized as ERROR:no_result
+    assert counts["ERROR"] == 3  # All 3 synthesized as ERROR:no_result
 
 
 def test_merge_order_preserved(tmp_path):
     """Parts written out of order must be merged in 1-based index order."""
-    job_path = Path("examples/hip-compliance/job.yaml")
+    job_path = Path("examples/linux/job.yaml")
     job = load_job(job_path)
     job.output_csv = tmp_path / "result.csv"
     job.output_log = tmp_path / "result.log"
 
     rows, _, _ = read_input_csv(job.input, job=job)
     parts_dir = get_parts_dir(job.output_csv)
-    init_parts_dir(parts_dir, job, total_rows=2, parallel=2)
+    init_parts_dir(parts_dir, job, total_rows=3, parallel=3)
 
     # Write VM 2 FIRST
-    res2 = RemoteResult(vars={"HIP_VERSION": "NOT_INSTALLED", "KERNEL_COUNT": "2"})
+    res2 = RemoteResult(vars={"OS_NAME": "Red Hat Enterprise Linux", "OS_VERSION": "8.10", "KERNEL_VERSION": "4.18.0", "UPTIME_SECS": "2400", "LOAD_1M": "0.10", "ROOT_DISK_USAGE": "20%", "HW_AUDIT_STATUS": "PASS"})
     vals2 = collect_for_vm(job, rows[1], remote_result=res2)
     logger2 = VMLogger(rows[1].vm_name, rows[1].index)
-    write_part_files(parts_dir, rows[1], total_rows=2, row_values=vals2, logger=logger2)
+    write_part_files(parts_dir, rows[1], total_rows=3, row_values=vals2, logger=logger2)
 
     # Write VM 1 SECOND
-    res1 = RemoteResult(vars={"HIP_VERSION": "22102026", "KERNEL_COUNT": "3"})
+    res1 = RemoteResult(vars={"OS_NAME": "Red Hat Enterprise Linux", "OS_VERSION": "9.4", "KERNEL_VERSION": "5.14.0", "UPTIME_SECS": "1200", "LOAD_1M": "0.05", "ROOT_DISK_USAGE": "15%", "HW_AUDIT_STATUS": "PASS"})
     vals1 = collect_for_vm(job, rows[0], remote_result=res1)
     logger1 = VMLogger(rows[0].vm_name, rows[0].index)
-    write_part_files(parts_dir, rows[0], total_rows=2, row_values=vals1, logger=logger1)
+    write_part_files(parts_dir, rows[0], total_rows=3, row_values=vals1, logger=logger1)
+
+    # Write VM 3 THIRD
+    res3 = RemoteResult(vars={"OS_NAME": "Oracle Linux Server", "OS_VERSION": "8.10", "KERNEL_VERSION": "5.15.0", "UPTIME_SECS": "3600", "LOAD_1M": "0.20", "ROOT_DISK_USAGE": "25%", "HW_AUDIT_STATUS": "FAIL"})
+    vals3 = collect_for_vm(job, rows[2], remote_result=res3)
+    logger3 = VMLogger(rows[2].vm_name, rows[2].index)
+    write_part_files(parts_dir, rows[2], total_rows=3, row_values=vals3, logger=logger3)
 
     merge_parts(job, rows, parts_dir)
 
     with open(job.output_csv, "r", encoding="utf-8") as f:
         reader = list(csv.reader(f))
 
-    assert reader[1][0] == "vm-app-01"
-    assert reader[2][0] == "vm-app-02"
+    assert reader[1][0] == "lin01"
+    assert reader[2][0] == "lin02"
+    assert reader[3][0] == "lin03"
 

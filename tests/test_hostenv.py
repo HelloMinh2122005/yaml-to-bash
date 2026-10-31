@@ -63,7 +63,7 @@ echo '3.2'
     fake_bash.chmod(0o755)
 
     monkeypatch.setenv("Y2_BASH", str(fake_bash))
-    job = load_job("examples/hip-compliance/job.yaml")
+    job = load_job("examples/linux/job.yaml")
     compiled, errors = compile_job(job)
 
     # In bash 3.2, errors are converted to warnings and not treated as fatal compile errors

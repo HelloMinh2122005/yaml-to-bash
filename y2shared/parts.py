@@ -36,7 +36,7 @@ def get_run_info(parts_dir: Path) -> dict[str, Any]:
 
 
 def update_run_phase(parts_dir: Path, phase: str) -> None:
-    """Update phase in run.json atomically ('invoke' | 'collect' | 'merged')."""
+    """Update phase in run.json atomically ('invoke' | 'collect' | 'post' | 'merged')."""
     run_json_path = parts_dir / "run.json"
     with open(run_json_path, "r", encoding="utf-8") as f:
         info = json.load(f)
@@ -168,4 +168,63 @@ def read_part_row(csv_path: Path) -> list[str]:
             if r:
                 return r
     return []
+
+
+def power_path(parts_dir: Path, row: VMRow, total_rows: int) -> Path:
+    """Return the .power path for a VM."""
+    width = max(4, len(str(total_rows)))
+    prefix = row.part_prefix(width=width)
+    return parts_dir / f"{prefix}.power"
+
+
+def write_power_once(power_file: Path, data: dict[str, Any]) -> bool:
+    """
+    Atomically write initial power state file (create-if-absent via O_EXCL).
+    Returns True if written, False if file already existed.
+    """
+    try:
+        fd = os.open(power_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        return False
+
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    return True
+
+
+def read_power(power_file: Path) -> dict[str, Any] | None:
+    """Read power state file if present, else None."""
+    if not power_file.is_file():
+        return None
+    try:
+        with open(power_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def update_power(power_file: Path, **updates) -> dict[str, Any]:
+    """Atomically update existing power state file with given keys."""
+    data = read_power(power_file) or {}
+    data.update(updates)
+    tmp_path = power_file.with_suffix(".power.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, power_file)
+    return data
+
+
+def append_part_log(log_path: Path, lines: list[str]) -> None:
+    """Atomically append lines to VM part log file."""
+    if not lines:
+        return
+    with open(log_path, "a", encoding="utf-8") as f:
+        for line in lines:
+            f.write(line if line.endswith("\n") else line + "\n")
+        f.flush()
+        os.fsync(f.fileno())
 

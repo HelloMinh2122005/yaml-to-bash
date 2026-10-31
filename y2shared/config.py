@@ -66,6 +66,16 @@ class Precheck:
     result: dict[str, dict[str, str]] = field(default_factory=dict)
     timeout: int = 120
     cache: str | None = None
+    phases: list[str] = field(default_factory=lambda: ["invoke"])
+
+
+@dataclass
+class PostRun:
+    name: str
+    script: str | None = None
+    script_path: Path | None = None
+    timeout: int = 120
+    result: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -116,6 +126,22 @@ class Job:
     run_timeout: int = 1800
     invoke: Invoke = field(default_factory=Invoke)
     collect: list[Column] = field(default_factory=list)
+    pre_run: list[Precheck] = field(default_factory=list)
+    post_run: list[PostRun] = field(default_factory=list)
+
+    @property
+    def starts_vms(self) -> bool:
+        return self.actions in ("start", "start-stop")
+
+    @property
+    def stops_after(self) -> bool:
+        return self.actions in ("stop", "start-stop")
+
+    def __post_init__(self) -> None:
+        if not self.pre_run and self.invoke and self.invoke.precheck:
+            self.pre_run = self.invoke.precheck
+        elif self.pre_run and self.invoke and not self.invoke.precheck:
+            self.invoke.precheck = self.pre_run
 
 
 def compute_content_hash(text: str) -> str:
@@ -150,9 +176,18 @@ def parse_job_from_dict(raw: dict[str, Any], yaml_path: str | Path, file_hash: s
             return cand
         return (yaml_dir / cand).resolve()
 
-    # Prechecks
+    # Prechecks (root pre_run or legacy invoke.precheck)
     invoke_raw = raw.get("invoke") or {}
-    prechecks_raw = invoke_raw.get("precheck") or []
+    has_pre_run = "pre_run" in raw
+    has_invoke_precheck = "precheck" in invoke_raw
+    if has_pre_run and has_invoke_precheck:
+        raise ValueError("Cannot define both root 'pre_run' and 'invoke.precheck'")
+
+    if has_pre_run:
+        prechecks_raw = raw.get("pre_run") or []
+    else:
+        prechecks_raw = invoke_raw.get("precheck") or []
+
     prechecks: list[Precheck] = []
     for item in prechecks_raw:
         if not isinstance(item, dict):
@@ -168,6 +203,16 @@ def parse_job_from_dict(raw: dict[str, Any], yaml_path: str | Path, file_hash: s
                     res_normalized[str(k)] = {}
 
         p_script_path = resolve_path(item.get("script_path"))
+        phase_val = item.get("phase") if "phase" in item else item.get("phases")
+        if phase_val is None:
+            phases = ["invoke"]
+        elif isinstance(phase_val, str):
+            phases = [phase_val]
+        elif isinstance(phase_val, list):
+            phases = [str(p) for p in phase_val]
+        else:
+            phases = ["invoke"]
+
         prechecks.append(
             Precheck(
                 name=str(item.get("name", "")),
@@ -176,6 +221,33 @@ def parse_job_from_dict(raw: dict[str, Any], yaml_path: str | Path, file_hash: s
                 result=res_normalized,
                 timeout=int(item.get("timeout", 120)),
                 cache=item.get("cache"),
+                phases=phases,
+            )
+        )
+
+    # Post-run hooks
+    post_run_raw = raw.get("post_run") or []
+    post_runs: list[PostRun] = []
+    for item in post_run_raw:
+        if not isinstance(item, dict):
+            continue
+        res_raw = item.get("result") or {}
+        res_normalized: dict[str, dict[str, str]] = {}
+        if isinstance(res_raw, dict):
+            for k, v in res_raw.items():
+                if isinstance(v, dict):
+                    res_normalized[str(k)] = {str(vk): str(vv) for vk, vv in v.items()}
+                else:
+                    res_normalized[str(k)] = {}
+
+        pr_script_path = resolve_path(item.get("script_path"))
+        post_runs.append(
+            PostRun(
+                name=str(item.get("name", "")),
+                script=item.get("script"),
+                script_path=pr_script_path,
+                timeout=int(item.get("timeout", 120)),
+                result=res_normalized,
             )
         )
 
@@ -261,6 +333,8 @@ def parse_job_from_dict(raw: dict[str, Any], yaml_path: str | Path, file_hash: s
         run_timeout=int(raw.get("run_timeout", 1800)),
         invoke=invoke,
         collect=columns,
+        pre_run=prechecks,
+        post_run=post_runs,
     )
 
 

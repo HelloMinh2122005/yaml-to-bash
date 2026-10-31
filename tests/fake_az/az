@@ -19,10 +19,87 @@ if log_file:
 # Verify that --subscription is always passed (spec rule)
 args = sys.argv[1:]
 
+# Extract VM name if present
+vm_name = None
+if "-n" in args:
+    idx = args.index("-n")
+    if idx + 1 < len(args):
+        vm_name = args[idx + 1]
+
+state_dir = os.environ.get("FAKE_AZ_STATE_DIR", "/tmp/fake_az_state")
+os.makedirs(state_dir, exist_ok=True)
+
+
+def get_counter(counter_name: str, env_key: str) -> int:
+    counter_file = os.path.join(state_dir, f"{vm_name}_{counter_name}.txt")
+    if not os.path.exists(counter_file):
+        val = int(os.environ.get(env_key, "0")) if env_key else 0
+        with open(counter_file, "w", encoding="utf-8") as f:
+            f.write(str(val))
+        return val
+    with open(counter_file, "r", encoding="utf-8") as f:
+        return int(f.read().strip())
+
+
+def decrement_counter(counter_name: str) -> None:
+    counter_file = os.path.join(state_dir, f"{vm_name}_{counter_name}.txt")
+    val = get_counter(counter_name, "")
+    with open(counter_file, "w", encoding="utf-8") as f:
+        f.write(str(max(0, val - 1)))
+
+
+def increment_counter(target_vm: str, counter_name: str) -> int:
+    counter_file = os.path.join(state_dir, f"{target_vm}_{counter_name}.txt")
+    val = 0
+    if os.path.exists(counter_file):
+        try:
+            with open(counter_file, "r", encoding="utf-8") as f:
+                val = int(f.read().strip())
+        except Exception:
+            val = 0
+    val += 1
+    with open(counter_file, "w", encoding="utf-8") as f:
+        f.write(str(val))
+    return val
+
+
+def get_state(target_vm: str) -> str:
+    state_file = os.path.join(state_dir, f"{target_vm}_state.txt")
+    if os.path.exists(state_file):
+        with open(state_file, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    state = os.environ.get(f"FAKE_AZ_STATE_{target_vm}", os.environ.get("FAKE_AZ_DEFAULT_STATE", "PowerState/running"))
+    set_state(target_vm, state)
+    return state
+
+
+def set_state(target_vm: str, state: str) -> None:
+    state_file = os.path.join(state_dir, f"{target_vm}_state.txt")
+    with open(state_file, "w", encoding="utf-8") as f:
+        f.write(state)
+
 # Phase 1 invoke: `az rest --method post --url /subscriptions/<id>/.../virtualMachines/<vm>/runCommand?... --body @file`.
 # Translate it into the equivalent fire-and-forget run-command call so the fixtures below apply unchanged.
 if args[:1] == ["rest"]:
     url = args[args.index("--url") + 1]
+    m_pwr = re.search(
+        r"^/subscriptions/([^/]+)/resourceGroups/([^/]+)/providers/Microsoft.Compute/virtualMachines/([^/?]+)/(deallocate|powerOff)\?api-version=",
+        url,
+    )
+    if m_pwr:
+        target_vm = m_pwr.group(3)
+        act = m_pwr.group(4)
+        if os.environ.get(f"FAKE_AZ_POWER_FAIL_{target_vm}"):
+            sys.stderr.write(f"Power action {act} failed for {target_vm}\n")
+            sys.exit(1)
+        if act == "deallocate":
+            set_state(target_vm, "PowerState/deallocated")
+            increment_counter(target_vm, "deallocate")
+        elif act == "powerOff":
+            set_state(target_vm, "PowerState/stopped")
+            increment_counter(target_vm, "poweroff")
+        sys.exit(0)
+
     m = re.search(
         r"^/subscriptions/([^/]+)/resourceGroups/([^/]+)/providers/Microsoft.Compute/virtualMachines/([^/?]+)/runCommand\?api-version=",
         url,
@@ -41,7 +118,8 @@ if args[:1] == ["rest"]:
         "vm", "run-command", "invoke", "--subscription", m.group(1), "-g", m.group(2), "-n", m.group(3),
         "--command-id", body["commandId"], "--scripts", f"@{script_file}", "--no-wait",
     ]
-if "run-command" in args or "get-instance-view" in args or "start" in args:
+    vm_name = m.group(3)
+if "run-command" in args:
     if "--subscription" not in args:
         sys.stderr.write("FATAL: az command executed without --subscription flag\n")
         sys.exit(1)
@@ -53,35 +131,6 @@ if expected_cmd and "--command-id" in args:
     if c_idx + 1 < len(args) and args[c_idx + 1] != expected_cmd:
         sys.stderr.write(f"FATAL: expected command id '{expected_cmd}', got '{args[c_idx + 1]}'\n")
         sys.exit(1)
-
-# Extract VM name if present
-vm_name = None
-if "-n" in args:
-    idx = args.index("-n")
-    if idx + 1 < len(args):
-        vm_name = args[idx + 1]
-
-state_dir = os.environ.get("FAKE_AZ_STATE_DIR", "/tmp/fake_az_state")
-os.makedirs(state_dir, exist_ok=True)
-
-
-def get_counter(counter_name: str, env_key: str) -> int:
-    counter_file = os.path.join(state_dir, f"{vm_name}_{counter_name}.txt")
-    if not os.path.exists(counter_file):
-        val = int(os.environ.get(env_key, "0"))
-        with open(counter_file, "w", encoding="utf-8") as f:
-            f.write(str(val))
-        return val
-    with open(counter_file, "r", encoding="utf-8") as f:
-        return int(f.read().strip())
-
-
-def decrement_counter(counter_name: str) -> None:
-    counter_file = os.path.join(state_dir, f"{vm_name}_{counter_name}.txt")
-    val = get_counter(counter_name, "")
-    with open(counter_file, "w", encoding="utf-8") as f:
-        f.write(str(max(0, val - 1)))
-
 
 # Handle `az account show`
 if "account" in args and "show" in args:
@@ -96,14 +145,21 @@ if "account" in args and "show" in args:
 
 # Handle `az vm start`
 if "vm" in args and "start" in args:
-    if os.environ.get("FAKE_AZ_START_FAIL"):
+    if os.environ.get("FAKE_AZ_START_FAIL") or (vm_name and os.environ.get(f"FAKE_AZ_START_FAIL_{vm_name}")):
         sys.stderr.write("Failed to start VM\n")
         sys.exit(1)
+    if vm_name:
+        set_state(vm_name, "PowerState/running")
+        increment_counter(vm_name, "start")
     sys.exit(0)
 
 # Handle `az vm get-instance-view`
 if "vm" in args and "get-instance-view" in args:
-    state = os.environ.get(f"FAKE_AZ_STATE_{vm_name}", os.environ.get("FAKE_AZ_DEFAULT_STATE", "PowerState/running"))
+    if vm_name:
+        increment_counter(vm_name, "get_instance_view")
+        state = get_state(vm_name)
+    else:
+        state = os.environ.get("FAKE_AZ_DEFAULT_STATE", "PowerState/running")
     # If -o tsv requested, output plain tsv
     if "-o" in args and "tsv" in args:
         print(state)
@@ -113,6 +169,11 @@ if "vm" in args and "get-instance-view" in args:
 
 # Handle `az vm run-command invoke`
 if "run-command" in args and "invoke" in args:
+    if vm_name:
+        increment_counter(vm_name, "invoke")
+        drift = os.environ.get(f"FAKE_AZ_DRIFT_{vm_name}")
+        if drift:
+            set_state(vm_name, drift)
     # Check fixtures configuration
     mode = os.environ.get(f"FAKE_AZ_RC_{vm_name}", os.environ.get("FAKE_AZ_RC_DEFAULT", "success"))
 
@@ -308,6 +369,10 @@ if "run-command" in args and "invoke" in args:
         b64_hf = base64.b64encode(b"KB5012345").decode("ascii")
         b64_build = base64.b64encode(b"20348").decode("ascii")
         b64_tls = base64.b64encode(b"1").decode("ascii")
+        b64_kb_date = base64.b64encode(b"2024-01-15").decode("ascii")
+        b64_count = base64.b64encode(b"42").decode("ascii")
+        b64_kernel = base64.b64encode(b"20348.2227").decode("ascii")
+        b64_osname = base64.b64encode(b"Windows Server 2022 Datacenter").decode("ascii")
         stdout_msg = (
             "===BEGIN_RESULT_RES===\n"
             f"__Y2B_RUN__={b64_run}\n"
@@ -317,8 +382,14 @@ if "run-command" in args and "invoke" in args:
             f"__Y2B_STEP_4__={b64_ok}\n"
             f"DEFENDER_ENABLED={b64_true}\n"
             f"SIGNATURE_AGE_DAYS={b64_age}\n"
+            f"REALTIME_ENABLED={b64_true}\n"
             f"LAST_HOTFIX={b64_hf}\n"
+            f"KB_VERSION={b64_hf}\n"
+            f"LAST_KB_DATE={b64_kb_date}\n"
+            f"HOTFIX_COUNT={b64_count}\n"
             f"OS_BUILD={b64_build}\n"
+            f"KERNEL_VERSION={b64_kernel}\n"
+            f"OS_NAME={b64_osname}\n"
             f"TLS12_ENABLED={b64_tls}\n"
             f"__Y2B_DONE__={b64_run}\n"
             "===END_RESULT_RES===\n"
@@ -340,6 +411,8 @@ if "run-command" in args and "invoke" in args:
         print(json.dumps(payload))
         sys.exit(0)
 
+    b64_linux_kver = base64.b64encode(b"5.14.0-362.el9.x86_64").decode("ascii")
+    b64_hw_pass = base64.b64encode(b"PASS").decode("ascii")
     payload = {
         "value": [
             {
@@ -352,8 +425,11 @@ if "run-command" in args and "invoke" in args:
                     f"__Y2B_STEP_1__={b64_ok}\n"
                     f"__Y2B_STEP_2__={b64_ok}\n"
                     f"__Y2B_STEP_3__={b64_ok}\n"
+                    f"__Y2B_STEP_4__={b64_ok}\n"
                     "HIP_VERSION=MjIxMDIwMjY=\n"
+                    f"KERNEL_VERSION={b64_linux_kver}\n"
                     "KERNEL_COUNT=Mw==\n"
+                    f"HW_AUDIT_STATUS={b64_hw_pass}\n"
                     f"__Y2B_DONE__={b64_run}\n"
                     "===END_RESULT_RES===\n"
                     "[stderr]\n"
