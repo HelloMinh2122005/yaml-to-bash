@@ -1,0 +1,20 @@
+{
+  "name": "y2",
+  "version": "1.0.0",
+  "description": "Antigravity implementation and execution squad for yaml_to_bash (y2b / y2p). Implements task cards, runs unit/container/Azure test tiers, performs internal code review, and debugs failures.",
+  "author": {
+    "name": "yaml_to_bash Team"
+  },
+  "keywords": [
+    "yaml_to_bash",
+    "y2b",
+    "y2p",
+    "azure",
+    "run-command",
+    "powershell",
+    "bash",
+    "tdd",
+    "multi-agent",
+    "gemini"
+  ]
+}

@@ -158,3 +158,104 @@ def test_claude_md_mentions_squad(repo_root: Path):
     assert "y2-tech-lead" in text
     assert "lab/run-lab.sh" in text
 
+
+AG_AGENTS = [
+    "y2-tech-lead",
+    "y2-engineer",
+    "y2-researcher",
+    "y2-test-engineer",
+    "y2-azure-tester",
+    "y2-reviewer",
+    "y2-debugger",
+]
+
+
+def test_ag_agents_flash_high(repo_root: Path):
+    agents_dir = repo_root / ".agents" / "plugins" / "y2" / "agents"
+    for name in AG_AGENTS:
+        agent_file = agents_dir / f"{name}.md"
+        assert agent_file.is_file(), f"Missing AG agent {agent_file}"
+        fm, body = _parse_frontmatter(agent_file.read_text())
+        assert fm.get("name") == name, f"Name mismatch in {name}.md: {fm.get('name')}"
+        assert fm.get("model") == "flash", f"Model mismatch in {name}.md: {fm.get('model')}"
+        assert fm.get("subagent") is True, f"subagent not true in {name}.md"
+        assert "Reasoning Effort Profile: HIGH" in body, f"Missing HIGH line in {name}.md body"
+
+
+def test_only_tech_lead_uses_chat(repo_root: Path):
+    agents_dir = repo_root / ".agents" / "plugins" / "y2" / "agents"
+    lead_file = agents_dir / "y2-tech-lead.md"
+    assert "agent-chat" in lead_file.read_text()
+
+    for name in AG_AGENTS:
+        if name != "y2-tech-lead":
+            content = (agents_dir / f"{name}.md").read_text()
+            assert "agent-chat" not in content, f"Agent {name} should not use agent-chat"
+
+
+def test_reviewer_cannot_edit(repo_root: Path):
+    reviewer_file = repo_root / ".agents" / "plugins" / "y2" / "agents" / "y2-reviewer.md"
+    fm, _ = _parse_frontmatter(reviewer_file.read_text())
+    tools = fm.get("tools", [])
+    assert "replace_file_content" not in tools, "y2-reviewer must not have replace_file_content"
+
+
+def test_lab_agents_use_runner(repo_root: Path):
+    agents_dir = repo_root / ".agents" / "plugins" / "y2" / "agents"
+    for name in ["y2-azure-tester", "y2-researcher"]:
+        content = (agents_dir / f"{name}.md").read_text()
+        assert "lab/run-lab.sh" in content, f"Agent {name} body must mention lab/run-lab.sh"
+
+
+def test_vendored_provenance(repo_root: Path):
+    vendored_dir = repo_root / ".agents" / "plugins" / "y2" / "skills" / "vendored"
+    expected = [
+        "bash-defensive-patterns",
+        "shellcheck-configuration",
+        "python-testing-patterns",
+        "azure-vms",
+        "powershell-windows",
+        "systematic-debugging",
+    ]
+    for v in expected:
+        vfile = vendored_dir / v / "SKILL.md"
+        assert vfile.is_file(), f"Vendored skill {vfile} not found"
+        text = vfile.read_text()
+        assert "Vendored from" in text, f"Missing 'Vendored from' in {v}"
+        assert "License: MIT" in text, f"Missing 'License: MIT' in {v}"
+
+    azure_vms = (vendored_dir / "azure-vms" / "SKILL.md").read_text()
+    assert "az vm create" not in azure_vms, "azure-vms must not contain 'az vm create'"
+
+
+def test_no_foreign_model_ids(repo_root: Path):
+    y2_dir = repo_root / ".agents" / "plugins" / "y2"
+    for path in y2_dir.rglob("*.md"):
+        content = path.read_text()
+        assert "model: sonnet" not in content, f"Foreign model id found in {path}"
+        assert "claude-" not in content, f"Foreign model id found in {path}"
+
+
+def test_plugin_json(repo_root: Path):
+    import json
+    plugin_file = repo_root / ".agents" / "plugins" / "y2" / "plugin.json"
+    assert plugin_file.is_file()
+    data = json.loads(plugin_file.read_text())
+    assert data.get("name") == "y2"
+
+
+def test_no_occupify_dependency(repo_root: Path):
+    for root_dir in [repo_root / ".claude", repo_root / ".agents"]:
+        for path in root_dir.rglob("*"):
+            if path.is_file():
+                content = path.read_text(errors="ignore")
+                assert "Occupify/" not in content, f"Occupify/ reference in {path}"
+                assert "chief-architect" not in content, f"chief-architect reference in {path}"
+                assert "ai-tech-lead" not in content, f"ai-tech-lead reference in {path}"
+
+    protocol = (repo_root / ".handoffs" / "PROTOCOL.md").read_text()
+    assert "Occupify/" not in protocol
+    assert "chief-architect" not in protocol
+    assert "ai-tech-lead" not in protocol
+
+
