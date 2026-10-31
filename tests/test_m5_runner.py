@@ -39,7 +39,6 @@ def create_job_and_csv(tmp_path: Path, num_vms: int = 10, prefix: str = "vm") ->
 input: "./list_vm.csv"
 output_log: "./result.log"
 output_csv: "./result.csv"
-actions: "skip"
 parallel: 10
 sleep_before_collect: 0
 invoke:

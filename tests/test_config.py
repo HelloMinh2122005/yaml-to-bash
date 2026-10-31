@@ -14,7 +14,7 @@ def test_load_example_job():
     assert job.input == (job.yaml_dir / "list_vm.csv").resolve()
     assert job.output_csv == (job.yaml_dir / "result.csv").resolve()
     assert job.output_log == (job.yaml_dir / "result.log").resolve()
-    assert job.actions == "start-stop"
+    assert job.result_actions == {"continue", "end_check", "stop", "start-stop"}
     assert job.parallel == 5
     assert job.sleep_before_collect == 15.0
     assert job.collect_retry_interval == 10.0

@@ -32,9 +32,9 @@ def test_missing_root_fields():
     assert "output_log" in error_paths
 
 
-def test_invalid_actions_and_parallel():
+def test_removed_root_actions_and_invalid_parallel():
     raw = get_valid_raw()
-    raw["actions"] = "invalid_action"
+    raw["actions"] = "skip"  # root 'actions' was removed: any value is an error
     raw["parallel"] = 0
     res = validate_job_dict(raw, "examples/linux/job.yaml")
     assert not res.is_valid

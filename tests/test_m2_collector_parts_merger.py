@@ -74,7 +74,6 @@ def test_tricky_values_and_computed_columns(tmp_path):
 input: "./test.csv"
 output_log: "./result.log"
 output_csv: "./result.csv"
-actions: "skip"
 parallel: 1
 sleep_before_collect: 0
 invoke:

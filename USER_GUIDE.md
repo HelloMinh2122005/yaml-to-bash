@@ -151,30 +151,11 @@ A job specification is written in YAML and defines pre-flight checks, remote VM 
 input: "./list_vm.csv"             # Target inventory CSV
 output_log: "./result.log"         # Consolidated execution log
 output_csv: "./result.csv"         # Final CSV report
-actions: "skip"                    # Power state policy: "skip" | "start" | "start-stop" | "stop"
 parallel: 15                       # Concurrent VM workers
 sleep_before_collect: "5m"         # REQUIRED. Delay before first collect attempt
 collect_retry_interval: "30s"      # Optional (default 30s). Wait before retrying still-busy VM
 collect_retries: 3                 # Optional (default 3). Maximum collect retries
 ```
-
-#### Power Management Policies (`actions`)
-The `actions` setting defines how the engine manages Azure VM power states:
-
-| Policy | Behavior on Stopped / Deallocated VM | Behavior After Run & `post_run` |
-|---|---|---|
-| `skip` *(default)* | Skips VM (`SKIPPED:<precheck_name>`). Does not start or stop VMs. | No power action taken. |
-| `start` | Starts VM via `az vm start`, waits, and proceeds with run. | Leaves VM running. |
-| `start-stop` | Starts VM via `az vm start`, waits, and proceeds with run. | **Restores previous state:** deallocates VM via ARM `/deallocate` if previously `deallocated`, `deallocating`, or `running`; powers off via ARM `/powerOff` if previously `stopped` or `stopping`. |
-| `stop` | Skips stopped VMs (`SKIPPED:<precheck_name>`); only targets running VMs. | **Deallocates all processed VMs** via ARM `/deallocate`. |
-
-> [!WARNING]
-> **Power Deallocation Safety Banner**: When running with `actions: "stop"` or `actions: "start-stop"`, an interactive banner warning is presented before execution:
-> ```text
-> Power policy: start-stop — after the job, deallocates up to N VMs, INCLUDING VMs that are running now
-> Proceed? (y/N)
-> ```
-> In automated pipelines (CI/CD / ADO) where `-y` or `--yes` is used, the warning is emitted to the log. An Environment Approval check is strongly recommended in ADO before running destructive power policies.
 
 ### 4.2 Prechecks (Host-side Pre-flight Checks: `pre_run`)
 Prechecks run on the **host runner machine** at the root level (`pre_run`). (The legacy `invoke.precheck` location remains supported for backwards compatibility with a deprecation warning).
@@ -203,10 +184,10 @@ pre_run:
     result:
       "PowerState/running":
         log: "VM is running"
-        action: "continue"
+        action: "continue"          # or "stop": run, then deallocate after the job
       "PowerState/deallocated":
         log: "VM is deallocated"
-        action: "skip"
+        action: "skip"              # or "start" / "start-stop"
 ```
 
 #### Precheck Phases (`phase`)
@@ -214,17 +195,41 @@ pre_run:
 - `["collect"]`: Executed in Phase 2 before reading results from the VM, and re-checked if `collect_retries` is exhausted. Prevents futile read attempts if a VM powered down during the wait period.
 - `["invoke", "collect"]`: Executed in both phases. Recommended for power state checks (`check-if-vm-is-running`).
 
-#### Precheck Actions
-- `action: "continue"`: Check passed; proceed to the next precheck or remote dispatch.
-- `action: "skip"`:
-  - In `phase: "invoke"`:
-    - If `actions: "skip"` or `actions: "stop"`: Stops processing this VM; non-passthrough columns receive `SKIPPED:<precheck_name>`.
-    - If `actions: "start"` or `actions: "start-stop"`: Atomically records initial power state in `.power` file, calls `az vm start`, waits, and re-evaluates the precheck once.
-  - In `phase: "collect"`:
-    - If `actions: "start"` or `actions: "start-stop"`: Re-starts the VM and re-evaluates.
-    - If `actions: "skip"` or `actions: "stop"`: Immediately records `ERROR:not_running_at_collect:<precheck_name>` without wasting time retrying reader commands.
-- `action: "end_check"`: Stops processing this VM immediately; non-passthrough columns receive `ENDED:<precheck_name>`.
+#### Precheck Actions (and Power Policy)
+There is no root-level power setting: each result's `action` decides what happens to the VM, so every power state gets its own policy.
+
+| `action` | At the check | After the job (Phase 3, after `post_run`) |
+|---|---|---|
+| `continue` | Check passed; proceed to the next precheck or remote dispatch. | Nothing. |
+| `skip` | Invoke: stop processing this VM; non-passthrough columns receive `SKIPPED:<precheck_name>`. Collect: `ERROR:not_running_at_collect:<precheck_name>` (no futile reader retries). | — |
+| `end_check` | Stop processing this VM; non-passthrough columns receive `ENDED:<precheck_name>`. | — |
+| `start` | `az vm start`, then re-evaluate this precheck once (`continue` or `stop` proceeds, anything else gives `ERROR:start_failed:<precheck_name>`). | Nothing: the VM stays running. |
+| `start-stop` | Records the current power state in the VM's `.power` file **before** starting, then the same as `start`. | **Restores the recorded state:** ARM `/powerOff` if it was `stopped` / `stopping`, otherwise ARM `/deallocate`. |
+| `stop` | Proceed, like `continue`. Takes effect only if every other check lets the VM through. | **Deallocates the VM** via ARM `/deallocate`. |
+
+- `start` and `start-stop` behave the same in both phases: a VM found not running at collect is started and re-read (its result file survives on disk).
+- The `.power` file is written once and never overwritten, so a resumed run (which now sees the VM as `running`) cannot replace the real previous state.
 - `default`: Fallback handler when script stdout does not match any listed key.
+
+Typical policies, written as results of `check-if-vm-is-running`:
+
+| Goal | `PowerState/running` | `PowerState/deallocated` / `stopped` |
+|---|---|---|
+| Leave power states alone | `continue` | `skip` |
+| Start stopped VMs, leave them running | `continue` | `start` |
+| Run everything, leave the whole fleet off afterwards | `stop` | `start-stop` |
+| Run only on running VMs, then shut them down | `stop` | `skip` |
+
+> [!NOTE]
+> The root `actions:` setting was removed. A job that still sets it fails validation with a hint to move the policy onto the `pre_run` results, as in the table above.
+
+> [!WARNING]
+> **Power Deallocation Safety Banner**: When any result uses `action: "stop"`, an interactive banner warning is presented before execution:
+> ```text
+> Power policy: pre_run uses action 'stop' — after the job, deallocates up to N VMs, INCLUDING VMs that are running now
+> Proceed? (y/N)
+> ```
+> When only `start-stop` is used, the banner says that VMs this run starts are returned to their previous power state. In automated pipelines (CI/CD / ADO) where `-y` or `--yes` is used, the warning is emitted to the log. An Environment Approval check is strongly recommended in ADO before running jobs that use `stop`.
 
 ### 4.3 RunCommand Steps (Remote Linux VM Execution)
 All steps under `runcommand.steps` are combined into a **single remote bash script**:
@@ -333,7 +338,7 @@ post_run:
 Each hook runs with the following environment variables exported:
 - `$Y2_OUTCOME`: Outcome of this VM (`OK`, `SKIPPED:<name>`, `ENDED:<name>`, `ERROR:<type>`).
 - `$Y2_RUN_ID`: Current run ID string (e.g. `20261031T090000Z-abcd1234`).
-- `$Y2_ACTIONS`: The configured power policy (`skip`, `start`, `start-stop`, `stop`).
+- `$Y2_POWER_AFTER`: The power action that runs after the hooks for this VM (`deallocate`, `powerOff`, or empty).
 - `$Y2_PREV_POWER_STATE`: The original VM power state from the `.power` file (e.g. `PowerState/running`, `PowerState/deallocated`).
 - All columns from the input inventory CSV as `$COLUMN_NAME` (e.g. `$VM_NAME`, `$RESOURCE_GROUP`, `$SUBSCRIPTION`).
 
@@ -420,7 +425,6 @@ See `examples/windows/job.yaml`:
 input: "./list_vm.csv"
 output_log: "./result.log"
 output_csv: "./result.csv"
-actions: "start-stop"
 parallel: 5
 
 sleep_before_collect: "20s"
@@ -455,13 +459,13 @@ pre_run:
     result:
       "PowerState/running":
         log: "VM is running"
-        action: "continue"
+        action: "stop"            # Deallocated after the job
       "PowerState/deallocated":
         log: "VM is deallocated"
-        action: "skip"
+        action: "start-stop"      # Started, then deallocated again after the job
       "PowerState/stopped":
         log: "VM is stopped"
-        action: "skip"
+        action: "start-stop"      # Started, then powered off again after the job
 
   # Remote Windows PowerShell runcommand
   runcommand:

@@ -48,7 +48,7 @@ from y2shared.parts import (
     write_power_once,
     read_power,
 )
-from y2shared.post import run_post_phase, PostPhaseResult
+from y2shared.post import POWER_AFTER_ACTIONS, run_post_phase, PostPhaseResult
 from y2shared.precheck import PrecheckEngine
 from y2shared.profile import Profile
 from y2shared.scan import build_var_to_step_map
@@ -161,7 +161,7 @@ def run_collect_phase(
                 write_power_once(p_path, data)
 
             proceed, marker = precheck_engine.run_prechecks_for_vm(
-                job, r, logger, phase="collect", on_power=on_power if job.stops_after else None
+                job, r, logger, phase="collect", on_power=on_power
             )
             if not proceed:
                 return r, ReadResult(status="ERROR", error=marker), logger
@@ -240,7 +240,7 @@ def run_collect_phase(
                                     write_power_once(p_path, data)
 
                                 proceed, c_marker = precheck_engine.run_prechecks_for_vm(
-                                    job, r, logger, phase="collect", on_power=on_power if job.stops_after else None
+                                    job, r, logger, phase="collect", on_power=on_power
                                 )
                                 if not proceed and c_marker:
                                     marker = c_marker
@@ -275,6 +275,19 @@ def run_collect_phase(
             concurrent.futures.wait(in_flight.keys())
 
     sys.stderr.write("\n")
+
+
+def power_policy_banner(job: Job, total_vms: int) -> str | None:
+    """Describe what the pre_run power actions will do after the job, or None if they do nothing."""
+    actions = job.result_actions
+    if "stop" in actions:
+        return (
+            f"pre_run uses action 'stop' — after the job, deallocates up to {total_vms} VMs, "
+            f"INCLUDING VMs that are running now"
+        )
+    if "start-stop" in actions:
+        return "pre_run uses action 'start-stop' — VMs this run starts are returned to their previous power state"
+    return None
 
 
 def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
@@ -397,12 +410,13 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
     print(f"  Collect retries:        {job.collect_retries}")
     print(f"  Output CSV:             {job.output_csv}")
     print(f"  Output Log:             {job.output_log}")
-    if job.stops_after:
-        print(f"  Power policy:           {job.actions} — after the job, deallocates up to {len(target_rows)} VMs, INCLUDING VMs that are running now")
+    power_banner = power_policy_banner(job, len(target_rows))
+    if power_banner:
+        print(f"  Power policy:           {power_banner}")
     print(f"==================================================\n")
 
-    if job.stops_after:
-        print(f"Power policy: {job.actions} — after the job, deallocates up to {len(target_rows)} VMs, INCLUDING VMs that are running now\n")
+    if power_banner:
+        print(f"Power policy: {power_banner}\n")
 
     if not args.yes and sys.stdin.isatty():
         try:
@@ -483,7 +497,7 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
                         write_power_once(p_path, data)
 
                     proceed, precheck_marker = precheck_engine.run_prechecks_for_vm(
-                        job, row, logger, phase="invoke", on_power=on_power if job.stops_after else None
+                        job, row, logger, phase="invoke", on_power=on_power
                     )
                     if not proceed:
                         row_vals = collect_for_vm(job, row, outcome_marker=precheck_marker, logger=logger, var_to_step=var_to_step)
@@ -492,9 +506,6 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
                         outcome_type = "SKIPPED" if "SKIPPED:" in (precheck_marker or "") else "ENDED"
                         run_state.update(outcome_type)
                         return
-
-                    if job.stops_after:
-                        on_power("PowerState/running", False)
 
                     # 2. Dry run
                     if args.dry_run:
@@ -711,7 +722,7 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
     print(f"  Error:       {counts.get('ERROR', 0)}")
     if post_result and (post_result.hooks_ok > 0 or post_result.hooks_failed > 0 or job.post_run):
         print(f"  Post hooks:  ok {post_result.hooks_ok} · failed {post_result.hooks_failed}")
-    if post_result and (post_result.deallocated > 0 or post_result.powered_off > 0 or job.stops_after):
+    if post_result and (post_result.deallocated > 0 or post_result.powered_off > 0 or job.result_actions & POWER_AFTER_ACTIONS):
         print(f"  Deallocated: {post_result.deallocated}")
         print(f"  Powered off: {post_result.powered_off}")
 

@@ -50,10 +50,19 @@ def read_vm_state(state_dir: Path, vm_name: str) -> str:
     return state_file.read_text(encoding="utf-8").strip()
 
 
+# Fleet scenarios expressed as per-result pre_run actions: (running, deallocated, stopped)
+POLICY_RESULT_ACTIONS = {
+    "skip": ("continue", "skip", "skip"),
+    "start": ("continue", "start", "start"),
+    "start-stop": ("stop", "start-stop", "start-stop"),
+    "stop": ("stop", "skip", "skip"),
+}
+
+
 def create_fleet_job(
     tmp_path: Path,
     vms: list[tuple[str, str]],  # (vm_name, initial_power_state)
-    actions: str = "skip",
+    policy: str = "skip",  # key of POLICY_RESULT_ACTIONS
     include_collect_precheck: bool = True,
     post_run_yaml: str = "",
     sleep_before_collect: str = "0s",
@@ -76,6 +85,7 @@ def create_fleet_job(
     collect_phase_str = '["invoke", "collect"]' if include_collect_precheck else '["invoke"]'
 
     post_block = f"\npost_run:\n{post_run_yaml}" if post_run_yaml else ""
+    running_action, deallocated_action, stopped_action = POLICY_RESULT_ACTIONS[policy]
 
     yaml_file = tmp_path / "job.yaml"
     yaml_file.write_text(
@@ -83,7 +93,6 @@ def create_fleet_job(
 input: "./list_vm.csv"
 output_log: "./result.log"
 output_csv: "./result.csv"
-actions: "{actions}"
 parallel: 5
 sleep_before_collect: "{sleep_before_collect}"
 collect_retry_interval: "0.1s"
@@ -103,9 +112,9 @@ pre_run:
     script: |
       az vm get-instance-view -g "$RESOURCE_GROUP" -n "$VM_NAME" --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code" -o tsv
     result:
-      "PowerState/running": {{ log: "running", action: "continue" }}
-      "PowerState/deallocated": {{ log: "deallocated", action: "skip" }}
-      "PowerState/stopped": {{ log: "stopped", action: "skip" }}
+      "PowerState/running": {{ log: "running", action: "{running_action}" }}
+      "PowerState/deallocated": {{ log: "deallocated", action: "{deallocated_action}" }}
+      "PowerState/stopped": {{ log: "stopped", action: "{stopped_action}" }}
 
 invoke:
   runcommand:
@@ -140,7 +149,6 @@ def test_r7_legacy_precheck_and_mutual_exclusion(tmp_path):
 input: "./list_vm.csv"
 output_log: "./result.log"
 output_csv: "./result.csv"
-actions: "skip"
 sleep_before_collect: "0s"
 invoke:
   precheck:
@@ -175,7 +183,6 @@ collect:
 input: "./list_vm.csv"
 output_log: "./result.log"
 output_csv: "./result.csv"
-actions: "skip"
 sleep_before_collect: "0s"
 pre_run:
   - name: "check-root"
@@ -231,7 +238,6 @@ def test_r1_phases_execution_and_subscription_cache(tmp_path, setup_fake_az_env)
 input: "./list_vm.csv"
 output_log: "./result.log"
 output_csv: "./result.csv"
-actions: "skip"
 parallel: 2
 sleep_before_collect: "0s"
 
@@ -376,7 +382,7 @@ def test_power_matrix(
         ("vm-04", "PowerState/deallocated"),
         ("vm-05", "PowerState/stopped"),
     ]
-    job_file = create_fleet_job(tmp_path, fleet, actions=policy)
+    job_file = create_fleet_job(tmp_path, fleet, policy=policy)
     args = argparse.Namespace(
         job_yaml=str(job_file),
         vm=[],
@@ -409,7 +415,7 @@ def test_power_matrix(
 def test_r3_crash_after_power_file_resumed(tmp_path, setup_fake_az_env):
     log_file, state_dir = setup_fake_az_env
     fleet = [("vm-01", "PowerState/running")]
-    job_file = create_fleet_job(tmp_path, fleet, actions="start-stop")
+    job_file = create_fleet_job(tmp_path, fleet, policy="start-stop")
     job = load_job(job_file)
     parts_dir = get_parts_dir(job.output_csv)
     init_parts_dir(parts_dir, job, total_rows=1, parallel=1)
@@ -470,7 +476,7 @@ def test_r4_still_running_held_until_resume(tmp_path, setup_fake_az_env, monkeyp
     result:
       ok: { log: "hook ran" }
 """
-    job_file = create_fleet_job(tmp_path, fleet, actions="start-stop", post_run_yaml=post_hook)
+    job_file = create_fleet_job(tmp_path, fleet, policy="start-stop", post_run_yaml=post_hook)
     args = argparse.Namespace(
         job_yaml=str(job_file),
         vm=[],
@@ -525,9 +531,9 @@ def test_r6_drift_skip_stop_errors_and_start_restarts(tmp_path, setup_fake_az_en
     # Cause vm-01 to drift to deallocated after invoke
     monkeypatch.setenv("FAKE_AZ_DRIFT_vm-01", "PowerState/deallocated")
 
-    # Case 1: actions: skip with collect check -> ERROR:not_running_at_collect
+    # Case 1: skip policy with collect check -> ERROR:not_running_at_collect
     fleet1 = [("vm-01", "PowerState/running")]
-    job_file1 = create_fleet_job(tmp_path / "run_skip", fleet1, actions="skip", include_collect_precheck=True)
+    job_file1 = create_fleet_job(tmp_path / "run_skip", fleet1, policy="skip", include_collect_precheck=True)
     args1 = argparse.Namespace(
         job_yaml=str(job_file1),
         vm=[],
@@ -545,9 +551,9 @@ def test_r6_drift_skip_stop_errors_and_start_restarts(tmp_path, setup_fake_az_en
         rows = list(csv.reader(f))
     assert any("ERROR:not_running_at_collect:check-if-vm-is-running" in col for col in rows[1])
 
-    # Case 2: actions: start-stop with collect check -> restarts VM and reads OK, ends deallocated
+    # Case 2: start-stop policy with collect check -> restarts VM and reads OK, ends deallocated
     fleet2 = [("vm-01", "PowerState/running")]
-    job_file2 = create_fleet_job(tmp_path / "run_ss", fleet2, actions="start-stop", include_collect_precheck=True)
+    job_file2 = create_fleet_job(tmp_path / "run_ss", fleet2, policy="start-stop", include_collect_precheck=True)
     args2 = argparse.Namespace(
         job_yaml=str(job_file2),
         vm=[],
@@ -583,13 +589,13 @@ def test_post_run_environment_and_failure_tolerance(tmp_path, setup_fake_az_env)
 
   - name: "dump-env-hook"
     script: |
-      echo "OUTCOME=$Y2_OUTCOME ACTIONS=$Y2_ACTIONS VM=$VM_NAME" > {env_dump}
+      echo "OUTCOME=$Y2_OUTCOME POWER=$Y2_POWER_AFTER VM=$VM_NAME" > {env_dump}
       echo ok
     result:
       ok: {{ log: "dumped env" }}
 """
     fleet = [("vm-01", "PowerState/running")]
-    job_file = create_fleet_job(tmp_path, fleet, actions="start-stop", post_run_yaml=post_yaml)
+    job_file = create_fleet_job(tmp_path, fleet, policy="start-stop", post_run_yaml=post_yaml)
     args = argparse.Namespace(
         job_yaml=str(job_file),
         vm=[],
@@ -607,7 +613,7 @@ def test_post_run_environment_and_failure_tolerance(tmp_path, setup_fake_az_env)
     # Second hook still ran and dumped env!
     dump_text = env_dump.read_text(encoding="utf-8").strip()
     assert "OUTCOME=OK" in dump_text
-    assert "ACTIONS=start-stop" in dump_text
+    assert "POWER=deallocate" in dump_text
     assert "VM=vm-01" in dump_text
 
     # Power action still ran even though first hook failed!
@@ -622,7 +628,7 @@ def test_dry_run_power_rules(tmp_path, setup_fake_az_env):
 
     # 1. Dry run with stop: running VMs must NOT be deallocated!
     fleet_stop = [("vm-01", "PowerState/running")]
-    job_stop = create_fleet_job(tmp_path / "dry_stop", fleet_stop, actions="stop")
+    job_stop = create_fleet_job(tmp_path / "dry_stop", fleet_stop, policy="stop")
     args_stop = argparse.Namespace(
         job_yaml=str(job_stop),
         vm=[],
@@ -641,7 +647,7 @@ def test_dry_run_power_rules(tmp_path, setup_fake_az_env):
     # 2. Dry run with start-stop: a VM that was deallocated and started during precheck
     # must be restored to deallocated!
     fleet_ss = [("vm-02", "PowerState/deallocated")]
-    job_ss = create_fleet_job(tmp_path / "dry_ss", fleet_ss, actions="start-stop")
+    job_ss = create_fleet_job(tmp_path / "dry_ss", fleet_ss, policy="start-stop")
     args_ss = argparse.Namespace(
         job_yaml=str(job_ss),
         vm=[],
@@ -665,7 +671,7 @@ def test_dry_run_power_rules(tmp_path, setup_fake_az_env):
 # ------------------------------------------------------------------------------
 def test_banner_power_policy_warning(tmp_path, setup_fake_az_env, capsys):
     fleet = [("vm-01", "PowerState/running")]
-    job_file = create_fleet_job(tmp_path, fleet, actions="start-stop")
+    job_file = create_fleet_job(tmp_path, fleet, policy="start-stop")
     args = argparse.Namespace(
         job_yaml=str(job_file),
         vm=[],
@@ -678,7 +684,30 @@ def test_banner_power_policy_warning(tmp_path, setup_fake_az_env, capsys):
     )
     run_job(args)
     captured = capsys.readouterr().out
-    assert "Power policy: start-stop — after the job, deallocates up to 1 VMs, INCLUDING VMs that are running now" in captured
+    assert (
+        "Power policy: pre_run uses action 'stop' — after the job, deallocates up to 1 VMs, "
+        "INCLUDING VMs that are running now"
+    ) in captured
+
+
+def test_banner_start_stop_only(tmp_path, setup_fake_az_env, capsys):
+    fleet = [("vm-01", "PowerState/running")]
+    job_file = create_fleet_job(tmp_path, fleet, policy="start")
+    job_file.write_text(job_file.read_text(encoding="utf-8").replace('action: "start"', 'action: "start-stop"'), encoding="utf-8")
+    args = argparse.Namespace(
+        job_yaml=str(job_file),
+        vm=[],
+        limit=None,
+        parallel=1,
+        dry_run=True,
+        resume=False,
+        keep_parts=False,
+        yes=True,
+    )
+    run_job(args)
+    captured = capsys.readouterr().out
+    assert "VMs this run starts are returned to their previous power state" in captured
+    assert "INCLUDING VMs that are running now" not in captured
 
 
 # ------------------------------------------------------------------------------
@@ -686,7 +715,7 @@ def test_banner_power_policy_warning(tmp_path, setup_fake_az_env, capsys):
 # ------------------------------------------------------------------------------
 def test_tmp_res_file_validator_warning(tmp_path):
     fleet = [("vm-01", "PowerState/running")]
-    job_file = create_fleet_job(tmp_path, fleet, actions="skip", res_file="/tmp/result.res")
+    job_file = create_fleet_job(tmp_path, fleet, policy="skip", res_file="/tmp/result.res")
     job, val_res = validate_job_file(job_file)
     assert val_res.is_valid
     assert any("res_file under /tmp may not survive a reboot or VM restart" in str(w) for w in val_res.warnings)
@@ -712,7 +741,7 @@ def test_y2p_start_stop_and_post_run(tmp_path, setup_fake_az_env, monkeypatch):
     job_file = create_fleet_job(
         tmp_path,
         fleet,
-        actions="start-stop",
+        policy="start-stop",
         post_run_yaml=post_hook,
         res_file='C:\\ProgramData\\y2p\\result.res',
         os_name="windows2022",

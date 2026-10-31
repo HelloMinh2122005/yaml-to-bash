@@ -84,7 +84,6 @@ def test_container_execution_rocky9(tmp_path):
 input: "./dummy.csv"
 output_log: "./result.log"
 output_csv: "./result.csv"
-actions: "skip"
 parallel: 1
 sleep_before_collect: 0
 invoke:

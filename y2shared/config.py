@@ -118,7 +118,6 @@ class Job:
     input: Path
     output_log: Path
     output_csv: Path
-    actions: str = "skip"
     parallel: int = 10
     sleep_before_collect: float = 0.0
     collect_retry_interval: float = 30.0
@@ -130,12 +129,9 @@ class Job:
     post_run: list[PostRun] = field(default_factory=list)
 
     @property
-    def starts_vms(self) -> bool:
-        return self.actions in ("start", "start-stop")
-
-    @property
-    def stops_after(self) -> bool:
-        return self.actions in ("stop", "start-stop")
+    def result_actions(self) -> set[str]:
+        """Every `action` value used by the pre_run results (power policy lives there)."""
+        return {str(spec.get("action", "")) for p in self.pre_run for spec in p.result.values()}
 
     def __post_init__(self) -> None:
         if not self.pre_run and self.invoke and self.invoke.precheck:
@@ -325,7 +321,6 @@ def parse_job_from_dict(raw: dict[str, Any], yaml_path: str | Path, file_hash: s
         input=input_path or Path(),
         output_log=output_log_path or Path(),
         output_csv=output_csv_path or Path(),
-        actions=str(raw.get("actions", "skip")),
         parallel=int(raw.get("parallel", 10)),
         sleep_before_collect=sleep_before_collect,
         collect_retry_interval=collect_retry_interval,

@@ -65,7 +65,6 @@ def test_precheck_actions_and_default(echo_val, expected_proceed, expected_marke
         input=tmp_path / "list.csv",
         output_log=tmp_path / "out.log",
         output_csv=tmp_path / "out.csv",
-        actions="skip",
         invoke=Invoke(precheck=[precheck]),
     )
     row = create_test_vm(1, "vm-01")
@@ -94,7 +93,6 @@ def test_precheck_unmatched_without_default(tmp_path):
         input=tmp_path / "list.csv",
         output_log=tmp_path / "out.log",
         output_csv=tmp_path / "out.csv",
-        actions="skip",
         invoke=Invoke(precheck=[precheck]),
     )
     row = create_test_vm(1, "vm-01")
@@ -109,7 +107,7 @@ def test_precheck_unmatched_without_default(tmp_path):
 
 def test_actions_start_policy_success(tmp_path):
     """
-    When actions: start is set, if precheck returns skip, it executes 'az vm start'
+    When a precheck result has action: start, it executes 'az vm start'
     and re-runs the precheck.
     We simulate this using a state file in tmp_path.
     """
@@ -144,7 +142,7 @@ exit 1
             script=check_script,
             result={
                 "PowerState/running": {"log": "running", "action": "continue"},
-                "PowerState/deallocated": {"log": "deallocated", "action": "skip"},
+                "PowerState/deallocated": {"log": "deallocated", "action": "start"},  # Triggers az vm start
             },
         )
         job = Job(
@@ -155,7 +153,6 @@ exit 1
             input=tmp_path / "list.csv",
             output_log=tmp_path / "out.log",
             output_csv=tmp_path / "out.csv",
-            actions="start",  # Triggers az vm start
             invoke=Invoke(precheck=[precheck]),
         )
         row = create_test_vm(1, "vm-01")
@@ -204,7 +201,6 @@ echo "0"
         input=tmp_path / "list.csv",
         output_log=tmp_path / "out.log",
         output_csv=tmp_path / "out.csv",
-        actions="skip",
         invoke=Invoke(precheck=[precheck]),
     )
 

@@ -48,7 +48,6 @@ def create_job_and_csv(
 input: "./list_vm.csv"
 output_log: "./result.log"
 output_csv: "./result.csv"
-actions: "skip"
 parallel: 5
 sleep_before_collect: "{sleep_before_collect}"
 collect_retry_interval: "{collect_retry_interval}"

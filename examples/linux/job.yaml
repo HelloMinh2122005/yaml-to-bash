@@ -4,7 +4,6 @@
 input: "./list_vm.csv"             # Target inventory CSV
 output_log: "./result.log"         # Consolidated execution log
 output_csv: "./result.csv"         # Final aggregated CSV report
-actions: "start-stop"              # Power policy: "skip" | "start" | "start-stop" | "stop"
 parallel: 5                        # Concurrent VM workers
 
 # Fire-and-forget collect timings
@@ -39,19 +38,23 @@ pre_run:
     script: |
       az vm get-instance-view --subscription "$SUBSCRIPTION" -g "$RESOURCE_GROUP" -n "$VM_NAME" \
         --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code" -o tsv
+    # Power policy per result: continue | skip | end_check | start | start-stop | stop
+    #   start      -> start the VM, recheck, run; leave it running
+    #   start-stop -> start the VM, recheck, run; after the job return it to this state
+    #   stop       -> run; after the job deallocate it
     result:
       "PowerState/running":
         log: "VM is running"
-        action: "continue"
+        action: "stop"            # Deallocated after the job
       "PowerState/deallocated":
         log: "VM is deallocated"
-        action: "skip"            # Handled according to root 'actions' policy
+        action: "start-stop"      # Started, then deallocated again after the job
       "PowerState/stopped":
         log: "VM is stopped"
-        action: "skip"
+        action: "start-stop"      # Started, then powered off again after the job
       default:
         log: "VM is not running"
-        action: "skip"
+        action: "start-stop"
 
 # ==============================================================================
 # Pipeline 1: Remote Execution Payload (y2b RunShellScript)
@@ -156,7 +159,7 @@ post_run:
   - name: "log-audit-summary"
     timeout: 30
     script: |
-      echo "[audit] Linux VM $VM_NAME ($RESOURCE_GROUP): outcome=$Y2_OUTCOME, prev_power=$Y2_PREV_POWER_STATE, action=$Y2_ACTIONS, run_id=$Y2_RUN_ID"
+      echo "[audit] Linux VM $VM_NAME ($RESOURCE_GROUP): outcome=$Y2_OUTCOME, prev_power=$Y2_PREV_POWER_STATE, power_after=$Y2_POWER_AFTER, run_id=$Y2_RUN_ID"
       echo ok
     result:
       ok:

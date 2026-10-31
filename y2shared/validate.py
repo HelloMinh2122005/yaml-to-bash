@@ -14,6 +14,7 @@ from y2shared.scan import scan_written_vars
 
 VAR_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 INPUT_SOURCE_PATTERN = re.compile(r"^input\.(.+)$")
+PRECHECK_ACTIONS = ("continue", "skip", "end_check", "start", "start-stop", "stop")
 
 
 @dataclass
@@ -74,11 +75,13 @@ def validate_job_dict(
         if not val or not isinstance(val, str) or not val.strip():
             err(req_field, f"Missing required field '{req_field}'")
 
-    # actions
+    # actions (removed: the power policy is set per pre_run result)
     if "actions" in raw:
-        actions = str(raw["actions"])
-        if actions not in ("skip", "start", "start-stop", "stop"):
-            err("actions", f"Invalid actions policy '{actions}'; must be 'skip', 'start', 'start-stop', or 'stop'")
+        err(
+            "actions",
+            "Root 'actions' was removed; set the power policy on each pre_run result instead "
+            "(action: continue | skip | end_check | start | start-stop | stop)",
+        )
 
     # parallel
     if "parallel" in raw:
@@ -147,7 +150,6 @@ def validate_job_dict(
         prechecks = None
         p_prefix = "pre_run"
 
-    has_skip_action = False
     if prechecks is not None:
         if not isinstance(prechecks, list):
             err(p_prefix, f"'{p_prefix}' must be a list")
@@ -225,13 +227,11 @@ def validate_job_dict(
                         if log_val is None or not isinstance(log_val, str):
                             err(f"{res_p}.log", "Result entry must define a 'log' string")
                         action_val = r_spec.get("action")
-                        if action_val not in ("continue", "skip", "end_check"):
-                            err(f"{res_p}.action", f"Invalid action '{action_val}'; must be 'continue', 'skip', or 'end_check'")
-                        if action_val == "skip":
-                            has_skip_action = True
-
-    if raw.get("actions") in ("stop", "start-stop") and not has_skip_action:
-        warn("actions", f"actions policy is '{raw.get('actions')}' but no pre_run check defines 'action: skip'")
+                        if action_val not in PRECHECK_ACTIONS:
+                            err(
+                                f"{res_p}.action",
+                                f"Invalid action '{action_val}'; must be one of: {', '.join(PRECHECK_ACTIONS)}",
+                            )
 
     # invoke.runcommand
     rc = invoke.get("runcommand")

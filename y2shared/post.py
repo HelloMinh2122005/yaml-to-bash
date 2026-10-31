@@ -27,6 +27,17 @@ from y2shared.shell import run_bash
 from y2shared.vmlog import VMLogger
 
 
+# pre_run result actions that leave a power action for Phase 3
+POWER_AFTER_ACTIONS = {"stop", "start-stop"}
+
+
+def restore_action(prev_state: str) -> str:
+    """Power action that returns a VM to prev_state: stopped VMs are powered off, everything else deallocated."""
+    if any(s in prev_state.lower() for s in ("stopped", "stopping")):
+        return "powerOff"
+    return "deallocate"
+
+
 def get_vm_outcome(row_values: list[str]) -> str:
     """Determine outcome marker from a part CSV row values."""
     for val in row_values:
@@ -85,7 +96,7 @@ def run_post_phase(
 
     # Check if there's any work to do
     has_hooks = bool(job.post_run) and not dry_run
-    has_power = job.stops_after or dry_run
+    has_power = bool(job.result_actions & POWER_AFTER_ACTIONS) or dry_run
     if not has_hooks and not has_power:
         return result
 
@@ -106,6 +117,12 @@ def run_post_phase(
 
         vm_lines: list[str] = [f"===== Phase 3: Post (Run ID: {run_id}) ====="]
 
+        # Power action: a .power file exists only for VMs a 'stop' or 'start-stop' result marked.
+        # Dry-run only undoes the starts this run made; it never deallocates a VM that was running.
+        power_act = None
+        if p_data and (started_by_run or not dry_run):
+            power_act = restore_action(prev_state)
+
         # 1. Post-run hooks (skipped in dry-run)
         v_hooks_ok = 0
         v_hooks_failed = 0
@@ -114,7 +131,7 @@ def run_post_phase(
             hook_env = dict(row.env)
             hook_env["Y2_OUTCOME"] = outcome
             hook_env["Y2_RUN_ID"] = run_id
-            hook_env["Y2_ACTIONS"] = job.actions
+            hook_env["Y2_POWER_AFTER"] = power_act or ""
             hook_env["Y2_PREV_POWER_STATE"] = prev_state
 
             for hook in job.post_run:
@@ -156,25 +173,6 @@ def run_post_phase(
                     v_hooks_failed += 1
 
         # 2. Power action
-        power_act = None
-        if dry_run:
-            # Phase 3 runs power action ONLY for VMs this run started
-            if started_by_run:
-                prev_lower = prev_state.lower()
-                if any(s in prev_lower for s in ("stopped", "stopping")):
-                    power_act = "powerOff"
-                else:
-                    power_act = "deallocate"
-        else:
-            if job.actions == "stop":
-                power_act = "deallocate"
-            elif job.actions == "start-stop":
-                prev_lower = prev_state.lower()
-                if any(s in prev_lower for s in ("stopped", "stopping")):
-                    power_act = "powerOff"
-                else:
-                    power_act = "deallocate"
-
         v_deallocated = 0
         v_powered_off = 0
         v_power_failed = 0

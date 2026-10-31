@@ -15,7 +15,7 @@ ADO **Approvals and checks** run *once per stage*. They answer whether **this pi
 | Are there active Sev-1 alerts? | run | ADO **Query Azure Monitor alerts** check |
 | Is subscription X reachable by this identity? | per subscription | `y2` precheck with `cache: subscription` (keep it, because it produces the `ENDED:` rows in `result.csv`) |
 | Is VM Y running / deallocated? | per VM | `y2` precheck (optionally backed by one Resource Graph query, see [04 §5](04-scale-and-operations.md#5-cheaper-prechecks-with-azure-resource-graph)) |
-| Should VM Y be started first (`actions: start`)? | per VM | `y2` |
+| Should VM Y be started first (`action: start` on a `pre_run` result)? | per VM | `y2` |
 
 ADO checks are configured on an **Environment** (used by a `deployment` job) or on the **service connection**. You do not write them in pipeline YAML. Putting them on the ARM service connection is the simplest option: every stage that uses that connection is gated.
 
