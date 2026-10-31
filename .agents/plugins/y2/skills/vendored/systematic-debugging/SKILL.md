@@ -38,3 +38,4 @@ Apply the minimal sufficient fix addressing the root cause:
 1. Run the failing test command — verify it now passes.
 2. Run the full test suite (`python3 -m pytest tests/ -v`).
 3. Hand the fix back to `y2-reviewer` for code review.
+

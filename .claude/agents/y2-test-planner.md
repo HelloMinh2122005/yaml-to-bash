@@ -36,3 +36,4 @@ Every test plan item must specify:
 - Python stdlib + PyYAML only (Python 3.9 compatibility).
 - macOS bash 3.2 host tolerance.
 - Windows PowerShell 5.1 payload compatibility (UTF-8 BOM, no pwsh 7-only syntax).
+

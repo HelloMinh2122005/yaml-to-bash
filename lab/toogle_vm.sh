@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Source lab identity from lab.env
 # shellcheck source=lab.env
-source "$(cd "$(dirname "$0")" && pwd)/lab.env"
+source "${Y2_LAB_ENV:-$(cd "$(dirname "$0")" && pwd)/lab.env}"
 SUBSCRIPTION="${LAB_SUBSCRIPTION_ID}"
 RESOURCE_GROUP="${LAB_RESOURCE_GROUP}"
 WAIT_FLAG="--no-wait"

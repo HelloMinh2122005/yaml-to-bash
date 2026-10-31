@@ -19,3 +19,4 @@ Comprehensive guidance for configuring and using ShellCheck to improve shell scr
 2. **Configure for your target shell** - Analyze with `shellcheck --shell=bash`.
 3. **Document exclusions** - When disabling a check (e.g. `# shellcheck disable=SC2086`), explain why.
 4. **Address violations** - Do not blindly suppress warnings.
+

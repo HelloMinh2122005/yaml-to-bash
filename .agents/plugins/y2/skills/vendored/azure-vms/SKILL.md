@@ -55,3 +55,4 @@ lab/run-lab.sh -- az vm run-command invoke \
   --command-id RunPowerShellScript \
   --scripts "Get-ComputerInfo"
 ```
+

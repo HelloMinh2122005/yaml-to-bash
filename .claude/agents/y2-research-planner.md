@@ -28,3 +28,4 @@ Every research item in `10-research-plan.md` must specify:
 
 ## Safety & Approval Gate
 Any research plan containing a `lab-probe` requires repository owner approval before dispatch. The lead will place the request in `AWAITING_RESEARCH_APPROVAL`. Docs and code-only research skip this approval gate.
+

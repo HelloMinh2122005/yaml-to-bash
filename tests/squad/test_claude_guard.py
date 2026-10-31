@@ -110,3 +110,4 @@ def test_settings_json_valid(repo_root: Path):
     deny = data.get("permissions", {}).get("deny", [])
     assert "Bash(az:*)" in deny
     assert "Read(./lab/terraform.tfvars)" in deny
+

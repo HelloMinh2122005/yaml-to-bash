@@ -26,3 +26,4 @@ hooks:
 | `accept <request-id>` | Follow the `y2-accept` skill to verify delivery evidence and complete acceptance. |
 | `status [request-id]` | Read and summarize `state.json` under `.handoffs/<request-id>/` (stage, baton, plan version, counters). No writes. |
 | anything else | Answer questions or instructions in character as `y2-lead` referencing the codebase and handoff docs. |
+

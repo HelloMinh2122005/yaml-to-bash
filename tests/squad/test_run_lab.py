@@ -267,3 +267,4 @@ def test_secret_not_in_evidence(lab_cfg, repo_root: Path, tmp_path: Path):
         if path.is_file():
             content = path.read_text(errors="ignore")
             assert secret not in content, f"Secret leaked in {path.name}"
+

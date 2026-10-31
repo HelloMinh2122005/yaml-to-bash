@@ -194,3 +194,4 @@ def test_hooks_json_valid(repo_root: Path):
     scripts_dir = repo_root / ".agents" / "plugins" / "y2" / "scripts"
     assert (scripts_dir / "protect_handoff.py").is_file()
     assert (scripts_dir / "lab_guard.py").is_file()
+

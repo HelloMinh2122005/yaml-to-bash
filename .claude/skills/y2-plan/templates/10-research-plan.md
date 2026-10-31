@@ -8,3 +8,4 @@
 - **Probe Command:** (if lab-probe: `lab/run-lab.sh -- <az command>`)
 - **Evidence Expected:** Expected output in 11-research-findings.md and 42-evidence/research/
 - **Stop Condition:** Criteria to complete investigation.
+

@@ -24,3 +24,4 @@
 - **command:** `lab/run-lab.sh --evidence .handoffs/<id>/42-evidence/t3/ -- y2b run examples/job.yaml -y`
 - **budget_seconds:** 1800
 - **pass_criteria:** Real execution completes, result.csv matches golden, all 5 lab VMs deallocated.
+

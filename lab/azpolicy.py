@@ -167,3 +167,4 @@ def check_az_args(argv: list[str], lab: LabEnv) -> Optional[str]:
             return f"rest method '{method}' is not allowed"
 
     return f"command '{' '.join(positionals)}' is not permitted by lab guard policy"
+

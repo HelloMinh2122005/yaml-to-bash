@@ -198,6 +198,7 @@ def test_reviewer_cannot_edit(repo_root: Path):
     fm, _ = _parse_frontmatter(reviewer_file.read_text())
     tools = fm.get("tools", [])
     assert "replace_file_content" not in tools, "y2-reviewer must not have replace_file_content"
+    assert "run_command" not in tools, "y2-reviewer must not have run_command"
 
 
 def test_lab_agents_use_runner(repo_root: Path):

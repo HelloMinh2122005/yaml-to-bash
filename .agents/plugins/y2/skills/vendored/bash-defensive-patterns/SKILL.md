@@ -27,3 +27,4 @@ Comprehensive guidance for writing production-ready Bash scripts using defensive
 9. **Design for idempotency** - Scripts should be safe to rerun
 10. **Use `command -v`** - Safer than `which` for checking executables
 11. **Prefer printf over echo** - More predictable across systems
+

@@ -6,3 +6,4 @@
 4. Honor the Definition of Ready before accepting any task card for implementation.
 5. Respect loop caps in `state.json` (`max_clarify_rounds`, `max_internal_fix_cycles`); never loop beyond caps.
 6. Baton passing requires updating `state.json` before sending any agent-chat message.
+

@@ -41,3 +41,4 @@ Claude does not review code. In `50-acceptance-cN.md`:
 3. If Tier 3 (real Azure) ran, verify `post-state.txt` proves all 5 VMs are deallocated.
 4. If gaps exist: send `ACCEPTANCE_RESULT` (`CHANGES_REQUESTED`).
 5. If evidence is complete: present to repository owner for final sign-off. On approval, send `DONE` and author `90-retro.md`.
+

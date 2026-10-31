@@ -28,3 +28,4 @@
 - **covers:** AC-1
 - **command:** `python3 -m pytest tests/ -v`
 - **pass_criteria:** Clean exit code 0.
+

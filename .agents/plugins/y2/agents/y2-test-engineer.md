@@ -32,3 +32,4 @@ You implement and execute test items (`TP-nn`) for Tier 1 and Tier 2 under the d
 ## Test Invariants
 - Tests must never touch real Azure credentials or make live network calls to Azure endpoints.
 - Preserve test isolation and deterministic order.
+

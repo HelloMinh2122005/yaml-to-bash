@@ -15,3 +15,4 @@ Guides `y2-azure-tester` in safely running live tests against the 5-VM Azure tes
    lab/run-lab.sh [--csv <csv_file>] --evidence .handoffs/<id>/42-evidence/t3/ -- <test_command>
    ```
 4. Verify deallocation: Read generated `.handoffs/<id>/42-evidence/t3/post-state.txt` and confirm all 5 VMs are deallocated.
+

@@ -93,8 +93,8 @@ AZURE_TENANT_ID=""
 AZURE_CLIENT_SECRET=""
 
 while IFS='=' read -r key val || [ -n "$key" ]; do
-    key=$(echo "$key" | tr -d ' \t\r\n')
-    val=$(echo "$val" | sed -e 's/^[ \t]*//' -e 's/[ \t\r\n]*$//' -e 's/^["'\'']//' -e 's/["'\'']$//')
+    key=$(printf '%s\n' "$key" | tr -d ' \t\r\n')
+    val=$(printf '%s\n' "$val" | sed -e 's/^[ \t]*//' -e 's/[ \t\r\n]*$//' -e 's/^["'\'']//' -e 's/["'\'']$//')
     case "$key" in
         AZURE_CLIENT_ID) AZURE_CLIENT_ID="$val" ;;
         AZURE_TENANT_ID) AZURE_TENANT_ID="$val" ;;

@@ -34,3 +34,4 @@ You execute research items (`R-nn`) from `10-research-plan.md` assigned by `y2-t
 ## Deliverables
 - Author `.handoffs/<request-id>/11-research-findings.md` documenting definitive answers and evidence for each `R-nn`.
 - Save all raw probe execution outputs into `.handoffs/<request-id>/42-evidence/research/`.
+

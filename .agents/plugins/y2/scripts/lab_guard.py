@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from typing import Optional
@@ -42,20 +43,23 @@ def decide_command(cmd: str) -> Optional[str]:
 
 def decide_read(path: str) -> Optional[str]:
     """Check if viewing path is allowed. Returns None if allowed, or refusal string."""
+    expanded = os.path.expanduser(path).replace("\\", "/")
     clean = path.replace("\\", "/")
     clean_lower = clean.lower()
+    expanded_lower = expanded.lower()
 
-    if "terraform.tfvars" in clean_lower:
-        return "Denied: access to terraform.tfvars is forbidden."
+    for target in (clean_lower, expanded_lower):
+        if "terraform.tfvars" in target:
+            return "Denied: access to terraform.tfvars is forbidden."
 
-    if ".tfstate" in clean_lower:
-        return "Denied: access to terraform state is forbidden."
+        if ".tfstate" in target:
+            return "Denied: access to terraform state is forbidden."
 
-    if "/lab/.terraform/" in clean or clean.startswith("lab/.terraform/") or "/.terraform/" in clean:
-        return "Denied: access to .terraform internal files is forbidden."
+        if "/lab/.terraform/" in target or target.startswith("lab/.terraform/") or "/.terraform/" in target:
+            return "Denied: access to .terraform internal files is forbidden."
 
-    if "/.config/y2-lab/" in clean or clean.startswith(".config/y2-lab") or "/.config/y2-lab" in clean:
-        return "Denied: access to ~/.config/y2-lab secrets is forbidden."
+        if ".config/y2-lab" in target:
+            return "Denied: access to ~/.config/y2-lab secrets is forbidden."
 
     return None
 
@@ -95,3 +99,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

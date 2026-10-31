@@ -28,3 +28,4 @@ You execute Tier 3 test items (`TP-nn`) against the live Azure test lab (`lin01`
 - If `lab/run-lab.sh` exits with code 78 (login or configuration error), notify `y2-tech-lead` immediately to raise `BLOCKED`.
 - Verify the deallocation guarantee: Ensure the run concludes with all 5 lab VMs verified deallocated in `post-state.txt`.
 - Store execution logs, status outputs, and result summaries in `.handoffs/<request-id>/42-evidence/t3/`.
+

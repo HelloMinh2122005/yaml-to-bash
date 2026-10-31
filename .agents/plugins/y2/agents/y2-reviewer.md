@@ -8,7 +8,6 @@ tools:
   - write_to_file
   - grep_search
   - list_dir
-  - run_command
 ---
 
 # y2-reviewer (Independent Code Reviewer)
@@ -41,3 +40,4 @@ You conduct independent code reviews for `y2-tech-lead`. You are a different per
 - **NIT:** Trivial phrasing or formatting feedback.
 
 Internal QA passes only when 0 BLOCKER and 0 MAJOR findings remain.
+

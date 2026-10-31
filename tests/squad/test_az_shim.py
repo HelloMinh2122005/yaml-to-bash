@@ -164,3 +164,4 @@ def test_shim_refuses_self_reference(repo_root: Path):
     )
     assert res.returncode == 3
     assert "refused" in res.stderr.lower()
+

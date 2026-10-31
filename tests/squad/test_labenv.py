@@ -113,3 +113,4 @@ def test_toggle_uses_lab_env(stub_az, repo_root: Path):
     calls = calls_file.read_text()
     assert "--resource-group rg-lab-10vms" in calls
     assert "--subscription 79f7da80-0c64-4e4b-9ed4-316a88142152" in calls
+

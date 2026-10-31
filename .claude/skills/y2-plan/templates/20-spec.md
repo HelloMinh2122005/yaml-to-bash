@@ -14,3 +14,4 @@
 - **Given:** [Precondition]
 - **When:** [Action/Trigger]
 - **Then:** [Observable Outcome]
+

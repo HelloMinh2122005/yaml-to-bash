@@ -206,3 +206,4 @@ For small changes, the squad operates in `lite` mode (`mode: "lite"` in `state.j
 - Qualification criteria: ≤ 2 code files touched, no changes to runner/dispatcher/resume/power semantics, and no live Azure lab probes required.
 - Single combined artifact: `20-lite-plan.md` merges brief, spec, plan, task cards, and test plan into one concise file.
 - Streamlined workflow: skips the separate research stage and helper fan-out while preserving all safety guards, test tiers, and evidence checks.
+

@@ -9,3 +9,4 @@
 7. Never execute `terraform` commands (`plan`, `apply`, `destroy`, `init`).
 8. Never read or inspect `lab/terraform.tfvars`, `*.tfstate*`, or `lab/.terraform/**`.
 9. Ensure every lab execution terminates with all 5 lab VMs verified deallocated.
+

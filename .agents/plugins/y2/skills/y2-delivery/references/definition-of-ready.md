@@ -8,3 +8,4 @@ Before accepting any task card `T-nn` for implementation, verify:
 - [ ] **Done Criteria:** Explicit `done_when:` naming one or more `TP-nn` test items.
 - [ ] **Size:** Estimated `S` or `M`.
 - [ ] **Dependencies:** Explicit `depends_on:` list.
+

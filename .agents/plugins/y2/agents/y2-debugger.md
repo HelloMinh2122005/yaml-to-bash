@@ -33,3 +33,4 @@ Every entry must include:
 - `Root Cause`: Detailed explanation of why the failure occurred.
 - `Fix`: Summary of changes applied.
 - `Evidence`: Verification output showing the fix succeeded.
+

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Optional
 
 ALLOWED_HANDOFF = re.compile(
@@ -32,10 +33,20 @@ def decide_write(rel_path: str) -> Optional[str]:
     if clean.startswith("lab/") or "/lab/" in clean:
         return "Denied: lab/ safety rails and scripts are protected from automated modifications."
 
-    if clean.startswith(".agents/plugins/y2/scripts/") or "/.agents/plugins/y2/scripts/" in clean:
+    if (
+        clean.startswith(".agents/plugins/y2/scripts/")
+        or "/.agents/plugins/y2/scripts/" in clean
+        or clean.startswith("scripts/")
+        or "/scripts/" in clean
+    ):
         return "Denied: Guard scripts cannot be modified."
 
-    if clean == ".agents/plugins/y2/hooks.json" or clean.endswith("/.agents/plugins/y2/hooks.json"):
+    if (
+        clean == ".agents/plugins/y2/hooks.json"
+        or clean.endswith("/.agents/plugins/y2/hooks.json")
+        or clean == "hooks.json"
+        or clean.endswith("/hooks.json")
+    ):
         return "Denied: Guard configuration hooks.json cannot be modified."
 
     if clean.startswith(".handoffs/") or "/.handoffs/" in clean:
@@ -58,7 +69,12 @@ def main() -> None:
         tool_call = payload.get("toolCall", {})
         args = tool_call.get("args", {})
 
-        repo_root = os.getcwd()
+        # Resolve repository root from __file__ location
+        cur = Path(__file__).resolve().parent
+        repo_root = cur.parent.parent.parent.parent
+        while repo_root.parent != repo_root and not ((repo_root / "CLAUDE.md").exists() or (repo_root / ".git").exists()):
+            repo_root = repo_root.parent
+        real_root = os.path.realpath(str(repo_root))
 
         # Find path arguments (matching /(file|path)/i but not content)
         content_keys = {"codecontent", "content", "replacement", "target", "replacement_text", "new_content", "old_content"}
@@ -73,12 +89,12 @@ def main() -> None:
             # Normalise relative to repo_root
             if os.path.isabs(p):
                 real_p = os.path.realpath(p)
-                real_root = os.path.realpath(repo_root)
-                try:
-                    rel_p = os.path.relpath(real_p, real_root)
-                except ValueError:
-                    rel_p = p
             else:
+                real_p = os.path.realpath(os.path.join(os.getcwd(), p))
+
+            try:
+                rel_p = os.path.relpath(real_p, real_root)
+            except ValueError:
                 rel_p = p
 
             refusal = decide_write(rel_p)

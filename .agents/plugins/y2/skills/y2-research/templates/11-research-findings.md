@@ -10,3 +10,4 @@
 - **Findings:** [Detailed factual answers]
 - **Evidence Reference:** [Citation / log path under 42-evidence/research/]
 - **Conclusion & Recommendation:** [Impact on spec/plan]
+

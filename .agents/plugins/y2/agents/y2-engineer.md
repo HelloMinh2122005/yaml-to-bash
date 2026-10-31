@@ -29,3 +29,4 @@ You implement task cards assigned by `y2-tech-lead` in `yaml_to_bash`.
 - **Bash:** Must run correctly under macOS host bash 3.2 (no associative arrays, no `${var,,}`).
 - **PowerShell:** Payloads for Windows VMs must execute under Windows PowerShell 5.1 (UTF-8 BOM, no pwsh 7+ features).
 - **Goldens:** Keep `tests/golden/hip_compliance_remote.sh` and `tests/golden/windows_baseline_remote.ps1` byte-identical unless explicitly directed by the card.
+
