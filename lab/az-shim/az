@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""az shim that only lets lab-scoped calls through to the real az CLI."""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+# Add lab directory to sys.path
+_lab_dir = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_lab_dir))
+
+from labenv import load_lab_env
+from azpolicy import check_az_args
+
+
+def main() -> None:
+    argv = sys.argv[1:]
+    env_file = os.environ.get("Y2_LAB_ENV") or str(_lab_dir / "lab.env")
+    try:
+        lab = load_lab_env(env_file)
+    except Exception as e:
+        sys.stderr.write(f"y2 lab guard: refused: failed to load lab env: {e}\n")
+        sys.exit(3)
+
+    refusal = check_az_args(argv, lab)
+    if refusal is not None:
+        sys.stderr.write(f"y2 lab guard: refused: {refusal}\n")
+        sys.exit(3)
+
+    real_az = os.environ.get("Y2_REAL_AZ")
+    if not real_az:
+        sys.stderr.write("y2 lab guard: refused: Y2_REAL_AZ environment variable not set\n")
+        sys.exit(3)
+
+    this_file = os.path.realpath(__file__)
+    if os.path.realpath(real_az) == this_file:
+        sys.stderr.write("y2 lab guard: refused: Y2_REAL_AZ points to this shim (recursive loop)\n")
+        sys.exit(3)
+
+    if not os.path.isfile(real_az) or not os.access(real_az, os.X_OK):
+        sys.stderr.write(f"y2 lab guard: refused: real az at '{real_az}' not found or not executable\n")
+        sys.exit(3)
+
+    # Exec real az
+    os.execv(real_az, [real_az] + argv)
+
+
+if __name__ == "__main__":
+    main()

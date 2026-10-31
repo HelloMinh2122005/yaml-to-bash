@@ -27,6 +27,7 @@ def stub_az(tmp_path: Path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     calls_file = tmp_path / "az_calls.txt"
+    calls_file.touch()
 
     az_script = bin_dir / "az"
     az_script.write_text(
