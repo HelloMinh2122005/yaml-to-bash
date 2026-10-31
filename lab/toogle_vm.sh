@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SUBSCRIPTION="79f7da80-0c64-4e4b-9ed4-316a88142152"
-RESOURCE_GROUP="rg-lab-10vms"
+# Source lab identity from lab.env
+# shellcheck source=lab.env
+source "$(cd "$(dirname "$0")" && pwd)/lab.env"
+SUBSCRIPTION="${LAB_SUBSCRIPTION_ID}"
+RESOURCE_GROUP="${LAB_RESOURCE_GROUP}"
 WAIT_FLAG="--no-wait"
 
 usage() {

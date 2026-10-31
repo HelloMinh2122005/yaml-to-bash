@@ -1,0 +1,1 @@
+# tests/squad package
