@@ -100,3 +100,21 @@ yaml_to_bash/
 - **Testing**:
   - `tests/fake_az/az` simulates Azure CLI responses, throttling, conflict busy states, and auth errors.
   - Container tests execute actual payloads using `rockylinux:9` (bash) and `mcr.microsoft.com/powershell:7.4-ubuntu-22.04` (pwsh).
+
+## Squad (Two-Platform Workflow)
+
+All feature work in this repository is designed and executed by a paired two-platform agent squad:
+- **Claude Squad (Thinking & Planning):** Frames requests, authors specs, plans, task cards, and three-tier test plans. Led by `y2-lead` (`claude-opus-5-5`), assisted by `y2-planner`, `y2-research-planner`, and `y2-test-planner` (`claude-sonnet-5-5`). Claude roles never write code and never review code.
+- **Antigravity Squad (Engineering & Execution):** Implements code, executes tests, conducts internal code reviews, and runs against the live Azure lab. Led by `y2-tech-lead` (`flash`), assisted by `y2-engineer`, `y2-researcher`, `y2-test-engineer`, `y2-azure-tester`, `y2-reviewer`, and `y2-debugger`.
+
+### Entry Points
+- Claude: `/y2-lead` (inbox), `/y2-lead plan <id> <brief>`, `/y2-lead accept <id>`, or `/y2-lead status [id]`.
+- Antigravity: `/check-message y2-tech-lead` or `@y2-tech-lead`.
+
+### Lab Safety Rules
+- Automated agents authenticate solely via scoped service principal credentials in `~/.config/y2-lab/sp.env` outside the repo.
+- Real Azure operations must strictly execute through `lab/run-lab.sh` with the safety `az` shim.
+- Operations are restricted to subscription `79f7da80-0c64-4e4b-9ed4-316a88142152` and resource group `rg-lab-10vms`. Terraform and `rg-tfstate` are strictly forbidden.
+- Every lab execution must finish with all 5 lab VMs deallocated.
+
+Protocol specification and contracts are defined in [.handoffs/PROTOCOL.md](.handoffs/PROTOCOL.md) and [docs/superpowers/specs/2026-10-31-y2-squad-design.md](docs/superpowers/specs/2026-10-31-y2-squad-design.md).
