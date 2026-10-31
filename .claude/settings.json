@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/guard_y2_writes.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "deny": [
+      "Read(./lab/terraform.tfvars)",
+      "Read(./lab/**/*.tfstate*)",
+      "Read(./lab/.terraform/**)",
+      "Read(~/.config/y2-lab/**)",
+      "Edit(./lab/terraform.tfvars)",
+      "Bash(terraform:*)",
+      "Bash(az:*)",
+      "Bash(./lab/run-lab.sh:*)",
+      "Bash(lab/run-lab.sh:*)"
+    ]
+  }
+}
