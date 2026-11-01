@@ -27,7 +27,8 @@ READER_CALL_TIMEOUT = 300
 # Phase 1 POSTs the runCommand action through `az rest` instead of `az vm run-command invoke --no-wait`:
 # `az rest` returns on the 202 Accepted without polling, on every azure-cli version, whereas `--no-wait`
 # exits 0 without sending the request before azure-cli 2.85.0 (Azure/azure-cli#32979).
-RUN_COMMAND_API_VERSION = "2024-07-01"
+COMPUTE_API_VERSION = "2024-07-01"
+RUN_COMMAND_API_VERSION = COMPUTE_API_VERSION
 GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
@@ -425,6 +426,119 @@ def invoke_nowait(
             duration_s=duration,
             raw_message=stderr,
         )
+
+
+def get_power_state(
+    row: VMRow,
+    logger: VMLogger | None = None,
+    circuit_breaker: AuthCircuitBreaker | None = None,
+    delay_multiplier: float = 1.0,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    timeout: int = 60,
+) -> tuple[str, str]:
+    """
+    Query the VM instance view to get its PowerState.
+    Returns:
+        (power_state, error_marker)
+        e.g. ("PowerState/running", "") or ("", "ERROR:vm_not_found")
+    """
+    cmd = [
+        "az",
+        "vm",
+        "get-instance-view",
+        "--subscription",
+        row.subscription,
+        "-g",
+        row.resource_group,
+        "-n",
+        row.vm_name,
+        "--query",
+        "instanceView.statuses[?starts_with(code, 'PowerState/')].code",
+        "-o",
+        "tsv",
+    ]
+    status, rc, stdout, stderr, attempts, duration = _az_run_command(
+        cmd=cmd,
+        timeout=timeout,
+        busy_policy="retry",
+        logger=logger or VMLogger(row.vm_name, row.index),
+        circuit_breaker=circuit_breaker,
+        delay_multiplier=delay_multiplier,
+        sleep_fn=sleep_fn,
+    )
+    if status == "SUCCESS":
+        st = stdout.strip()
+        if st:
+            first_line = st.splitlines()[0].strip().strip('"')
+            return first_line, ""
+        return "PowerState/unknown", ""
+    else:
+        return "", status
+
+
+def power_action_nowait(
+    row: VMRow,
+    action: str,  # "deallocate" or "powerOff"
+    logger: VMLogger | None = None,
+    circuit_breaker: AuthCircuitBreaker | None = None,
+    delay_multiplier: float = 1.0,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    timeout: int = INVOKE_CALL_TIMEOUT,
+) -> tuple[bool, str]:
+    """
+    Send deallocate or powerOff action via az rest.
+    For powerOff, checks get_power_state first and skips if already stopped.
+    Returns:
+        (success, status_or_marker)
+    """
+    vmlog = logger or VMLogger(row.vm_name, row.index)
+
+    def run_az(cmd: list[str]) -> tuple:
+        return _az_run_command(
+            cmd=cmd,
+            timeout=timeout,
+            busy_policy="retry",
+            logger=vmlog,
+            circuit_breaker=circuit_breaker,
+            delay_multiplier=delay_multiplier,
+            sleep_fn=sleep_fn,
+        )
+
+    if action == "powerOff":
+        state, err = get_power_state(
+            row=row,
+            logger=vmlog,
+            circuit_breaker=circuit_breaker,
+            delay_multiplier=delay_multiplier,
+            sleep_fn=sleep_fn,
+        )
+        state_lower = state.lower()
+        if any(s in state_lower for s in ("stopped", "stopping", "deallocated", "deallocating")):
+            vmlog.log(f"VM {row.vm_name} is already {state}; skipping powerOff.")
+            return True, "already_stopped"
+
+    subscription_id, sub_status = SUBSCRIPTIONS.resolve(row.subscription, run_az)
+    if subscription_id is None:
+        vmlog.log_error(f"Cannot resolve subscription '{row.subscription}' to an ID ({sub_status})")
+        return False, sub_status
+
+    url = (
+        f"/subscriptions/{subscription_id}"
+        f"/resourceGroups/{urllib.parse.quote(row.resource_group, safe='')}"
+        f"/providers/Microsoft.Compute/virtualMachines/{urllib.parse.quote(row.vm_name, safe='')}"
+        f"/{action}?api-version={COMPUTE_API_VERSION}"
+    )
+    cmd = ["az", "rest", "--method", "post", "--url", url]
+    status, rc, stdout, stderr, attempts, duration = run_az(cmd)
+    if status == "SUCCESS":
+        vmlog.log(f"Power action '{action}' accepted in {duration:.1f}s.")
+        return True, "SUCCESS"
+    elif status == "ERROR:vm_not_found":
+        vmlog.log(f"VM {row.vm_name} not found ({status}); counting as done.")
+        return True, "vm_not_found"
+    else:
+        vmlog.log_error(f"Power action '{action}' failed: {status}")
+        return False, status
 
 
 def read_results(

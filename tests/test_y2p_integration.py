@@ -48,7 +48,6 @@ def create_windows_job(tmp_path: Path, num_vms: int = 20) -> Path:
 input: "./list_vm.csv"
 output_log: "./result.log"
 output_csv: "./result.csv"
-actions: "skip"
 parallel: 5
 
 sleep_before_collect: "1s"

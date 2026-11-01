@@ -1,0 +1,73 @@
+# ==============================================================================
+# Azure DevOps Pipeline: Native Sequential Loop (Raw az vm run-command invoke)
+# Reference: az_devops/03-pipeline-reference.md, 04-scale-and-operations.md
+# ==============================================================================
+name: native-loop-$(Date:yyyyMMdd)$(Rev:.r)
+trigger: none
+lockBehavior: sequential
+
+parameters:
+  - name: serviceConnection
+    displayName: Azure ARM Service Connection
+    type: string
+    default: sc-azure-lab
+  - name: inventoryCsv
+    displayName: Inventory CSV Path
+    type: string
+    default: examples/linux/list_vm.csv
+
+pool:
+  vmImage: ubuntu-latest
+
+jobs:
+  - job: RunLoop
+    displayName: Sequential Run-Command Loop
+    timeoutInMinutes: 60
+    steps:
+      - checkout: self
+
+      # Single Resource Graph query replacing per-VM ARM reads (04 §5)
+      - task: AzureCLI@2
+        displayName: Pre-query Resource Graph Power States (04 §5)
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            az config set extension.use_dynamic_install=yes_without_prompt >/dev/null
+            az graph query --first 1000 -o tsv --query "data[].[name, rg, power]" -q "
+              resources
+              | where type =~ 'microsoft.compute/virtualmachines'
+              | project name = tolower(name), rg = tolower(resourceGroup),
+                        power = tostring(properties.extended.instanceView.powerState.code)" \
+              > "$(Build.SourcesDirectory)/powerstate.tsv"
+
+      # Execute sequential loop script
+      - task: AzureCLI@2
+        displayName: Execute Sequential Run-Command Loop
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -uo pipefail
+            REPORT_DIR="$(Build.ArtifactStagingDirectory)/results"
+            mkdir -p "$REPORT_DIR"
+
+            bash pipelines/scripts/native-loop.sh \
+              "${{ parameters.inventoryCsv }}" \
+              "$REPORT_DIR/fleet_native_results.csv" \
+              "$(Build.SourcesDirectory)/powerstate.tsv"
+            rc=$?
+
+            if [[ -f "$REPORT_DIR/fleet_native_results.csv" ]]; then
+              echo "=== Native Loop CSV Output ==="
+              cat "$REPORT_DIR/fleet_native_results.csv"
+            fi
+            exit "$rc"
+
+      - publish: $(Build.ArtifactStagingDirectory)/results
+        artifact: native-loop-results
+        displayName: Publish Results
+        condition: succeededOrFailed()

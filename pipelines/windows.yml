@@ -1,0 +1,81 @@
+# ==============================================================================
+# Azure DevOps Pipeline: Windows Fleet Diagnostics (y2p)
+# Reference: az_devops/03-pipeline-reference.md, 04-scale-and-operations.md
+# ==============================================================================
+name: windows-$(Date:yyyyMMdd)$(Rev:.r)
+trigger: none
+lockBehavior: sequential
+
+parameters:
+  - name: serviceConnection
+    displayName: Azure ARM Service Connection
+    type: string
+    default: sc-azure-lab
+  - name: parallel
+    displayName: Concurrency Budget (workers)
+    type: number
+    default: 5
+  - name: vmFilter
+    displayName: Optional VM Filter (empty = all in CSV)
+    type: object
+    default: []
+
+pool:
+  vmImage: ubuntu-latest
+
+jobs:
+  - job: Run
+    displayName: Execute y2p Windows Fleet
+    timeoutInMinutes: 180
+    steps:
+      - checkout: self
+      - template: templates/y2-setup.yml
+
+      # Single Resource Graph query replacing per-VM ARM reads (04 §5)
+      - task: AzureCLI@2
+        displayName: Pre-query Resource Graph Power States (04 §5)
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            az config set extension.use_dynamic_install=yes_without_prompt >/dev/null
+            az graph query --first 1000 -o tsv --query "data[].[name, rg, power]" -q "
+              resources
+              | where type =~ 'microsoft.compute/virtualmachines'
+              | project name = tolower(name), rg = tolower(resourceGroup),
+                        power = tostring(properties.extended.instanceView.powerState.code)" \
+              > "$(Build.SourcesDirectory)/examples/windows/powerstate.tsv"
+
+      # Execute y2p
+      - task: AzureCLI@2
+        displayName: y2p run (invoke + wait + collect)
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -uo pipefail
+            args=()
+            for v in ${{ join(' ', parameters.vmFilter) }}; do args+=(--vm "$v"); done
+            [ "${{ parameters.parallel }}" -gt 0 ] && args+=(--parallel "${{ parameters.parallel }}")
+
+            y2p run examples/windows/job.yaml -y "${args[@]}"
+            rc=$?
+            if [ "$rc" -eq 2 ]; then
+              echo "##vso[task.logissue type=warning]Some VMs were not OK. See result.csv."
+              echo "##vso[task.complete result=SucceededWithIssues;]"
+              rc=0
+            fi
+            exit "$rc"
+
+      - publish: examples/windows/result.csv
+        artifact: y2p-result-csv
+        displayName: Publish result.csv
+        condition: succeededOrFailed()
+
+      - publish: examples/windows/result.log
+        artifact: y2p-result-log
+        displayName: Publish result.log
+        condition: succeededOrFailed()

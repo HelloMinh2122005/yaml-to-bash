@@ -45,7 +45,11 @@ if [ -f "$REQ_FILE" ]; then
   fi
 fi
 
-# 4. Check if this script is being sourced or executed directly
+# 4. Link CLI executables into virtual environment bin/
+ln -sf "${SCRIPT_DIR}/bin/y2b" "${VENV_DIR}/bin/y2b"
+ln -sf "${SCRIPT_DIR}/bin/y2p" "${VENV_DIR}/bin/y2p"
+
+# 5. Check if this script is being sourced or executed directly
 is_sourced() {
   if [ -n "$ZSH_VERSION" ]; then
     case $ZSH_EVAL_CONTEXT in *:file) return 0;; esac
