@@ -29,5 +29,10 @@ ENV/
 *.swp
 *.swo
 
+# Squad & AI metadata
+.handoffs/
+az_devops/
+.claude/
+.agents/
 docs/
 CLAUDE.md
