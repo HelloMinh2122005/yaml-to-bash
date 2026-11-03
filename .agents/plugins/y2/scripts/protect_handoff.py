@@ -14,8 +14,38 @@ ALLOWED_HANDOFF = re.compile(
     r"^\.handoffs/[^/]+/(state\.json|11-research-findings\.md|30-questions\.md|40-delivery-report\.md|41-diff\.patch|42-evidence/.+|43-code-review-c[0-9]+\.md|44-debug-log\.md)$"
 )
 
+Y2_DEVELOPER_AGENTS = {
+    "y2-engineer",
+    "y2-test-engineer",
+    "y2-azure-tester",
+    "y2-reviewer",
+    "y2-debugger",
+    "y2-researcher",
+}
 
-def decide_write(rel_path: str) -> Optional[str]:
+APP_CODE_PATTERN = re.compile(
+    r"^(y2b|y2p|y2shared|bin|examples|tests|pipelines)/"
+)
+
+
+def read_first_step(transcript_path: str) -> Optional[dict]:
+    if not transcript_path or not os.path.exists(transcript_path):
+        return None
+    try:
+        with open(transcript_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    return json.loads(line)
+                except Exception:
+                    return None
+    except Exception:
+        return None
+
+
+def decide_write(rel_path: str, is_lead: bool = False) -> Optional[str]:
     """Check if write to rel_path is allowed. Returns None if allowed, or denial reason."""
     clean = rel_path.replace("\\", "/")
     if clean.startswith("./"):
@@ -56,6 +86,14 @@ def decide_write(rel_path: str) -> Optional[str]:
         if not ALLOWED_HANDOFF.match(sub_path):
             return f"Denied: Antigravity squad may not write to '{clean}'. See .handoffs/PROTOCOL.md §2."
 
+    # Enforce lead delegation constraint
+    if is_lead and APP_CODE_PATTERN.match(clean):
+        return (
+            f"Denied: y2-tech-lead is prohibited from authoring application code or tests ('{clean}'). "
+            f"As lead, your role is to Think, Plan, Delegate, and Review. "
+            f"Delegate this task via invoke_subagent: code -> y2-engineer, tests -> y2-test-engineer / y2-azure-tester, debugging -> y2-debugger."
+        )
+
     return None
 
 
@@ -75,6 +113,15 @@ def main() -> None:
         while repo_root.parent != repo_root and not ((repo_root / "CLAUDE.md").exists() or (repo_root / ".git").exists()):
             repo_root = repo_root.parent
         real_root = os.path.realpath(str(repo_root))
+
+        # Check caller identity
+        transcript_path = payload.get("transcriptPath", "")
+        last_user_input = payload.get("lastUserInput", "")
+        first_step = read_first_step(transcript_path)
+        content = str(first_step.get("content", "")) if first_step else ""
+
+        is_dev = any(f"[agent: {dev}]" in content or f"[agent: {dev}]" in last_user_input for dev in Y2_DEVELOPER_AGENTS)
+        is_lead = not is_dev and ("y2-tech-lead" in last_user_input or "y2-tech-lead" in content or "[agent: y2-tech-lead]" in content)
 
         # Find path arguments (matching /(file|path)/i but not content)
         content_keys = {"codecontent", "content", "replacement", "target", "replacement_text", "new_content", "old_content"}
@@ -97,7 +144,7 @@ def main() -> None:
             except ValueError:
                 rel_p = p
 
-            refusal = decide_write(rel_p)
+            refusal = decide_write(rel_p, is_lead=is_lead)
             if refusal is not None:
                 print(json.dumps({"decision": "deny", "reason": refusal}))
                 return

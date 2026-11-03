@@ -34,9 +34,18 @@ from y2shared.hostenv import (
     start_caffeinate,
     stop_caffeinate,
 )
-from y2shared.inputcsv import VMRow, read_input_csv
+from y2shared.inputcsv import VMRow, read_input_csv, select_target_rows
+from y2shared.azcmd import KIND_INVOKE, KIND_READER
+from y2shared.aztrace import RECORDER
+from y2shared.conformance import (
+    ConformanceReport,
+    evaluate as evaluate_conformance,
+    format_summary as format_conformance_summary,
+)
 from y2shared.merger import merge_parts, MergeError
 from y2shared.parts import (
+    append_part_log,
+    get_part_paths,
     get_parts_dir,
     init_parts_dir,
     get_run_info,
@@ -47,13 +56,21 @@ from y2shared.parts import (
     power_path,
     write_power_once,
     read_power,
+    read_part_row,
 )
-from y2shared.post import POWER_AFTER_ACTIONS, run_post_phase, PostPhaseResult
+from y2shared.plan import PlanContext
+from y2shared.adolog import (
+    ProcessLogSink,
+    emit_warning,
+    is_tf_build,
+    print_vm_groups,
+)
+from y2shared.post import POWER_AFTER_ACTIONS, run_post_phase, PostPhaseResult, get_vm_outcome
 from y2shared.precheck import PrecheckEngine
 from y2shared.profile import Profile
 from y2shared.scan import build_var_to_step_map
 from y2shared.validate import validate_job_file
-from y2shared.vmlog import VMLogger
+from y2shared.vmlog import VMLogger, set_line_sink
 
 
 @dataclass
@@ -252,6 +269,7 @@ def run_collect_phase(
                     else:
                         # Completed OK or with error marker
                         if res.status == "OK":
+                            RECORDER.expect(r.index, KIND_READER)
                             row_vals = collect_for_vm(job, r, remote_result=res, logger=logger, var_to_step=var_to_step)
                             logger.finalize("OK")
                             run_state.update("OK")
@@ -292,6 +310,14 @@ def power_policy_banner(job: Job, total_vms: int) -> str | None:
 
 def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
     """Main execution function invoked by `<tool> run`."""
+    phase_mode = getattr(args, "phase", "all")
+    dry_run = getattr(args, "dry_run", False)
+    if phase_mode != "all" and dry_run:
+        print("ERROR: --phase invoke|collect cannot be combined with --dry-run", file=sys.stderr)
+        return 1
+
+    resume = bool(getattr(args, "resume", False) or phase_mode == "collect")
+
     check_host_bash()
     if profile is None:
         from y2b.profile import PROFILE
@@ -323,17 +349,14 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
     var_to_step = build_var_to_step_map(job, profile.write_result_re)
 
     # 3. Filter VMs (--vm and --limit)
-    target_rows = rows
-    if args.vm:
-        vm_set = set(args.vm)
-        target_rows = [r for r in target_rows if r.vm_name in vm_set]
-
-    if args.limit is not None and args.limit > 0:
-        target_rows = target_rows[: args.limit]
+    target_rows = select_target_rows(rows, getattr(args, "vm", []), getattr(args, "limit", None))
 
     if not target_rows:
         print("No target VMs selected to run.", file=sys.stderr)
         return 0
+
+    RECORDER.reset()
+    plan_ctx = PlanContext.from_rows(job, target_rows, profile)
 
     parallel = args.parallel if args.parallel is not None else job.parallel
     raise_nofile(required_fds=parallel * 4 + 32)
@@ -341,16 +364,28 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
 
     # 4. Initialize Parts Directory & Get run_id
     parts_dir = get_parts_dir(job.output_csv)
+    if phase_mode == "collect":
+        run_json_path = parts_dir / "run.json"
+        if not parts_dir.exists() or not run_json_path.exists():
+            print(
+                f"ERROR: Cannot resume in collect mode: parts folder '{parts_dir}' or run.json does not exist.",
+                file=sys.stderr,
+            )
+            return 1
+
     try:
         run_id = init_parts_dir(
             parts_dir=parts_dir,
             job=job,
             total_rows=len(target_rows),
             parallel=parallel,
-            resume=args.resume,
+            resume=resume,
         )
     except Exception as e:
-        print(f"ERROR: {e}", file=sys.stderr)
+        if phase_mode == "collect":
+            print(f"ERROR: Cannot resume in collect mode: {e}", file=sys.stderr)
+        else:
+            print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
     # 5. Compile Remote & Collect Scripts
@@ -385,17 +420,32 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
     stored_phase = "invoke"
     existing_records: dict[int, dict[str, Any]] = {}
 
-    if args.resume:
+    if resume:
         run_info = get_run_info(parts_dir)
         stored_phase = run_info.get("phase", "invoke")
+        if phase_mode == "collect" and not collect_list.path.exists():
+            print(
+                f"ERROR: Cannot resume in collect mode: {collect_list.path} is missing.",
+                file=sys.stderr,
+            )
+            return 1
         if stored_phase in ("collect", "merged") and not collect_list.path.exists():
-            print(f"ERROR: Cannot resume: {collect_list.path} is missing while run was in phase '{stored_phase}'.", file=sys.stderr)
+            print(
+                f"ERROR: Cannot resume: {collect_list.path} is missing while run was in phase '{stored_phase}'.",
+                file=sys.stderr,
+            )
             return 1
         try:
             existing_records = collect_list.load(target_rows)
         except Exception as e:
             print(f"ERROR: Failed to load collect list during resume: {e}", file=sys.stderr)
             return 1
+
+        if phase_mode == "collect" and stored_phase == "invoke":
+            print(
+                "WARNING: Phase 1 did not complete (run.json phase=invoke); collecting the VMs that were fired.",
+                file=sys.stderr,
+            )
 
     # 7. Confirmation Prompt
     print(f"\n==================================================")
@@ -404,7 +454,9 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
     print(f"  Target VMs:             {len(target_rows)} (from {job.input.name})")
     print(f"  Parallel:               {parallel}")
     print(f"  Dry run:                {args.dry_run}")
-    print(f"  Resume:                 {args.resume} (Phase: {stored_phase})")
+    print(f"  Resume:                 {resume} (Phase: {stored_phase})")
+    if phase_mode != "all":
+        print(f"  Run phase:              {phase_mode}")
     print(f"  Sleep before collect:   {job.sleep_before_collect}s")
     print(f"  Collect retry interval: {job.collect_retry_interval}s")
     print(f"  Collect retries:        {job.collect_retries}")
@@ -433,6 +485,51 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
     circuit_breaker = AuthCircuitBreaker(threshold=5)
     precheck_engine = PrecheckEngine()
     post_result: PostPhaseResult | None = None
+    work_set: list[tuple[VMRow, dict[str, Any]]] = []
+    conformance_report: ConformanceReport | None = None
+
+    sink = ProcessLogSink() if is_tf_build() else None
+    if sink is not None:
+        set_line_sink(sink.add)
+
+    def resolve_outcome(row: VMRow) -> str:
+        csv_path, _ = get_part_paths(parts_dir, row, len(target_rows))
+        if csv_path.is_file() and csv_path.stat().st_size > 0:
+            row_vals = read_part_row(csv_path)
+            if row_vals:
+                return get_vm_outcome(row_vals)
+        if phase_mode == "invoke" and collect_list.has(row.index):
+            return "invoked"
+        return "no_result"
+
+    def _print_groups(rows: Sequence[VMRow]) -> None:
+        if sink is not None:
+            print_vm_groups(rows, sink, resolve_outcome)
+
+    def _eval_conformance(phases_to_eval: list[str], rows_worked: list[VMRow]) -> ConformanceReport:
+        nonlocal conformance_report
+        report = evaluate_conformance(plan_ctx, rows_worked, RECORDER, phases_run=phases_to_eval)
+        conformance_report = report
+
+        if report.mismatches:
+            row_map = {r.vm_name: r for r in rows_worked}
+            for vm_name, prob in report.mismatches.items():
+                mismatch_line = f"conformance: {vm_name}: {prob}"
+                sys.stderr.write(f"{mismatch_line}\n")
+                emit_warning(mismatch_line)
+
+                r = row_map.get(vm_name)
+                if r is not None:
+                    p_log = get_part_paths(parts_dir, r, len(target_rows))[1]
+                    append_part_log(p_log, [mismatch_line])
+                    if phase_mode == "invoke":
+                        records = collect_list.load(target_rows)
+                        if r.index in records:
+                            rec = records[r.index]
+                            rec.setdefault("log", []).append(mismatch_line)
+                            collect_list.append(rec)
+
+        return report
 
     ctrl_c_count = 0
     interrupted_event = threading.Event()
@@ -462,11 +559,13 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
         # Determine VMs for phase 1: VMs with no finished part file AND not in collect list (§3.7)
         phase1_rows: list[VMRow] = []
         for r in target_rows:
-            if args.resume and is_part_finished(parts_dir, r, len(target_rows)):
+            if resume and is_part_finished(parts_dir, r, len(target_rows)):
                 run_state.update("OK")
                 continue
             if r.index in existing_records:
                 # Already fired or attempted in previous run
+                continue
+            if phase_mode == "collect":
                 continue
             phase1_rows.append(r)
 
@@ -540,6 +639,7 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
                     )
 
                     if invoke_res.success:
+                        RECORDER.expect(row.index, KIND_INVOKE)
                         rec["confirmed"] = True
                         rec["attempts"] = invoke_res.attempts
                         rec["log"] = list(logger.lines)
@@ -604,16 +704,45 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
 
         # Check circuit breaker & Ctrl-C after Phase 1
         if circuit_breaker.is_tripped:
+            report = _eval_conformance(["invoke"], phase1_rows)
+            _print_groups(phase1_rows)
+            print(format_conformance_summary(report))
+            if phase_mode == "invoke":
+                collect_list.ensure_exists()
+                records = collect_list.load(target_rows)
+                fired = sum(1 for rec in records.values() if rec.get("confirmed"))
+                print(f"fired={fired}")
             print("\nFATAL: Run aborted due to 5 consecutive Azure authentication failures in Phase 1.", file=sys.stderr)
             print(f"Part files preserved in: {parts_dir}", file=sys.stderr)
             print(f"Rerun with: {profile.tool} run {job.yaml_path} --resume", file=sys.stderr)
             return 3
 
         if ctrl_c_count > 0 or run_state.stop_requested:
+            report = _eval_conformance(["invoke"], phase1_rows)
+            _print_groups(phase1_rows)
+            print(format_conformance_summary(report))
+            if phase_mode == "invoke":
+                collect_list.ensure_exists()
+                records = collect_list.load(target_rows)
+                fired = sum(1 for rec in records.values() if rec.get("confirmed"))
+                print(f"fired={fired}")
             print(f"\nRun interrupted by user. Note: already-fired scripts keep running on the VMs.", file=sys.stderr)
             print(f"Part files preserved in: {parts_dir}", file=sys.stderr)
             print(f"Rerun with: {profile.tool} run {job.yaml_path} --resume", file=sys.stderr)
             return 3
+
+        if phase_mode == "invoke":
+            report = _eval_conformance(["invoke"], phase1_rows)
+            _print_groups(phase1_rows)
+            print(format_conformance_summary(report))
+            collect_list.ensure_exists()
+            cur_phase = get_run_info(parts_dir).get("phase", "invoke")
+            if cur_phase not in ("post", "merged"):
+                update_run_phase(parts_dir, "collect")
+            records = collect_list.load(target_rows)
+            fired = sum(1 for rec in records.values() if rec.get("confirmed"))
+            print(f"fired={fired}")
+            return 0
 
         # ==============================================================================
         # 10. Phase 2 — Collect (R2, R3, R4)
@@ -625,7 +754,7 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
             all_collect_records = collect_list.load(target_rows)
             row_by_index = {r.index: r for r in target_rows}
 
-            work_set: list[tuple[VMRow, dict[str, Any]]] = []
+            work_set.clear()
             for idx, rec in all_collect_records.items():
                 if idx in row_by_index:
                     r = row_by_index[idx]
@@ -652,12 +781,24 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
 
         # Check circuit breaker & Ctrl-C after Phase 2
         if circuit_breaker.is_tripped:
+            work_indices = set(r.index for r in phase1_rows) | set(r.index for r, _ in work_set)
+            rows_worked = [r for r in target_rows if r.index in work_indices]
+            phases_to_eval = ["invoke", "collect"] if phase_mode == "all" else ["collect"]
+            report = _eval_conformance(phases_to_eval, rows_worked)
+            _print_groups(rows_worked)
+            print(format_conformance_summary(report))
             print("\nFATAL: Run aborted due to 5 consecutive Azure authentication failures in Phase 2.", file=sys.stderr)
             print(f"Part files preserved in: {parts_dir}", file=sys.stderr)
             print(f"Rerun with: {profile.tool} run {job.yaml_path} --resume", file=sys.stderr)
             return 3
 
         if ctrl_c_count > 0 or run_state.stop_requested:
+            work_indices = set(r.index for r in phase1_rows) | set(r.index for r, _ in work_set)
+            rows_worked = [r for r in target_rows if r.index in work_indices]
+            phases_to_eval = ["invoke", "collect"] if phase_mode == "all" else ["collect"]
+            report = _eval_conformance(phases_to_eval, rows_worked)
+            _print_groups(rows_worked)
+            print(format_conformance_summary(report))
             print(f"\nRun interrupted by user. Note: already-fired scripts keep running on the VMs.", file=sys.stderr)
             print(f"Part files preserved in: {parts_dir}", file=sys.stderr)
             print(f"Rerun with: {profile.tool} run {job.yaml_path} --resume", file=sys.stderr)
@@ -677,9 +818,12 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
             parallel=parallel,
             circuit_breaker=circuit_breaker,
             dry_run=args.dry_run,
+            restore_orphans=(phase_mode == "collect"),
         )
 
     finally:
+        if sink is not None:
+            set_line_sink(None)
         stop_caffeinate(caffeinate_proc)
         signal.signal(signal.SIGINT, original_sigint)
 
@@ -696,7 +840,25 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
         for r in target_rows
     )
 
-    keep_parts = args.keep_parts or has_still_running or has_pending_post
+    keep_parts = getattr(args, "keep_parts", False) or has_still_running or has_pending_post
+
+    # Conformance evaluation before merge
+    if phase_mode == "all":
+        work_indices = (
+            set(r.index for r in phase1_rows)
+            | set(r.index for r, _ in work_set)
+            | (post_result.orphan_indices if post_result else set())
+        )
+        rows_worked = [r for r in target_rows if r.index in work_indices]
+        phases_to_eval = ["invoke", "collect", "post"]
+    else:  # collect
+        work_indices = (
+            set(r.index for r, _ in work_set)
+            | (post_result.orphan_indices if post_result else set())
+        )
+        rows_worked = [r for r in target_rows if r.index in work_indices]
+        phases_to_eval = ["collect", "post"]
+    conformance_report = _eval_conformance(phases_to_eval, rows_worked)
 
     print("Merging VM part files...")
     try:
@@ -707,6 +869,9 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
             keep_parts=keep_parts,
         )
     except MergeError as me:
+        if conformance_report is not None:
+            _print_groups(rows_worked)
+            print(format_conformance_summary(conformance_report))
         print(f"\nFATAL: {me}", file=sys.stderr)
         return 3
 
@@ -740,6 +905,9 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
         print(f"    Rerun later to read remaining VMs: {profile.tool} run {job.yaml_path} --resume")
 
     print("==================================================")
+    if conformance_report is not None:
+        _print_groups(rows_worked)
+        print(format_conformance_summary(conformance_report))
 
     if (
         counts.get("SKIPPED", 0) > 0

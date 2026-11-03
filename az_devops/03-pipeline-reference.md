@@ -7,6 +7,12 @@ All examples assume:
 - `output_csv` / `output_log` in `job.yaml` sit next to `job.yaml` (as in both examples). The parts dir is then `<job dir>/.<csv stem>.parts`.
 - [Level 2](README.md#adoption-levels) uses the proposed `--phase` flag from [02 §3](02-two-runcommand-pattern.md#3-the-one-cli-change-needed---phase). [§4](#4-level-1-single-job-no-code-change) works today without it.
 
+> 💡 **Recommended:** Rather than manually creating and maintaining hand-written pipeline YAML files, use `y2b export-ado` or `y2p export-ado` (ADR-001) to generate verified, self-contained pipeline definitions. Complete generated pipelines are committed under `pipelines/generated/linux/` and `pipelines/generated/windows/`.
+>
+> Note that the generated Collect condition differs from the hand-written template below: generated pipelines use a hardened condition:
+> `and(in(dependencies.Wait.result, 'Succeeded', 'Skipped'), or(succeeded('Invoke'), and(failed('Invoke'), eq(dependencies.Invoke.outputs['Invoke.pack.hasState'], 'true'))))`
+> ensuring that if Invoke fails after firing VMs and saving state, the Collect stage still executes to retrieve results and trigger Phase 3 power restoration (the aborted-invoke restore path).
+
 Suggested layout:
 
 ```

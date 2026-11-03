@@ -26,6 +26,17 @@ class CollectList:
         self.path = self.parts_dir / "collect_list.jsonl"
         self._lock = threading.Lock()
 
+    def has(self, index: int) -> bool:
+        """Return True if index is present in collect_list."""
+        return index in self.load()
+
+    def ensure_exists(self) -> None:
+        """Ensure collect_list.jsonl exists (touch file, mkdir parents)."""
+        self.parts_dir.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            if not self.path.exists():
+                self.path.touch()
+
     def append(self, record: dict[str, Any]) -> None:
         """
         Append a single record atomically.

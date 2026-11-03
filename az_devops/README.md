@@ -40,7 +40,11 @@ This is the same two-phase design the CLI already uses. The difference is that t
 
 Start with **L1** to prove auth and networking from an ADO agent. Move to **L2** once that works. **L3** is how other teams consume it.
 
+## Generated Pipelines
+
+Instead of hand-crafting pipeline YAML or decomposing jobs into per-step tasks, use the generated pipeline workflow via `y2b export-ado` / `y2p export-ado` (ADR-001). Production-ready, verified pipelines are generated and committed under `pipelines/generated/linux/` and `pipelines/generated/windows/`. Each generated pipeline encapsulates the complete two-phase lifecycle (Validate → Fleet: Invoke → Wait → Collect), while the `y2` engine executes all steps inside exactly two Run Commands per VM.
+
 ## Out of scope
 
-- Converting `job.yaml` into ADO YAML (`${{ each step }}` → one task per step). This creates one run-command per step per VM, which is the pattern `y2` exists to avoid. See [01-concept-mapping.md §4](01-concept-mapping.md#4-why-not-translate-jobyaml-into-native-ado-steps).
+- Native ADO tasks per step (`${{ each step }}` → one task per step): creating one run-command per step per VM is the anti-pattern `y2` exists to avoid. Instead, use the generated pipeline approach via `export-ado` (committed under `pipelines/generated/`, see ADR-001). See [01-concept-mapping.md §4](01-concept-mapping.md#4-why-not-translate-jobyaml-into-native-ado-steps).
 - Installing an ADO agent on every VM (Environment VM resources). This is a valid alternative and is compared in [01-concept-mapping.md §5](01-concept-mapping.md#5-alternatives-considered), but it is a different model.

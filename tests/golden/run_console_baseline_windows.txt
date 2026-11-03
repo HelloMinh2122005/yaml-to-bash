@@ -1,0 +1,32 @@
+==================================================
+yaml_to_powershell Run Plan (v2 Fire-and-Forget)
+  Job file:               job.yaml
+  Target VMs:             2 (from list_vm.csv)
+  Parallel:               5
+  Dry run:                False
+  Resume:                 False (Phase: invoke)
+  Sleep before collect:   20.0s
+  Collect retry interval: 15.0s
+  Collect retries:        3
+  Output CSV:             <DIR>/result.csv
+  Output Log:             <DIR>/result.log
+  Power policy:           pre_run uses action 'stop' — after the job, deallocates up to 2 VMs, INCLUDING VMs that are running now
+==================================================
+
+Power policy: pre_run uses action 'stop' — after the job, deallocates up to 2 VMs, INCLUDING VMs that are running now
+
+Merging VM part files...
+
+==================================================
+Run Completed
+  Total VMs:   2
+  OK:          2
+  Skipped:     0
+  Ended:       0
+  Error:       0
+  Post hooks:  ok 2 · failed 0
+  Deallocated: 2
+  Powered off: 0
+  Output CSV:  <DIR>/result.csv
+  Output Log:  <DIR>/result.log
+==================================================

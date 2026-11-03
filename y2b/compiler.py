@@ -48,7 +48,7 @@ def _clean_script_body(body: str, is_file: bool = False) -> str:
     return "\n".join(lines)
 
 
-def compile_job(job: Job, run_id: str = "preview") -> tuple[str, list[str]]:
+def compile_job(job: Job, run_id: str = "preview", check_syntax: bool = True) -> tuple[str, list[str]]:
     """
     Compile runcommand steps into a single composite bash script.
     Returns:
@@ -122,31 +122,32 @@ def compile_job(job: Job, run_id: str = "preview") -> tuple[str, list[str]]:
         )
 
     # Check bash -n syntax
-    bash_path, (major, minor) = resolve_bash()
-    try:
-        proc = subprocess.run(
-            [bash_path, "-n"],
-            input=compiled,
-            text=True,
-            capture_output=True,
-        )
-        if proc.returncode != 0:
-            if major > 0 and major < 4:
-                import sys
-                print(
-                    f"WARNING: Syntax warning in compiled bash script (checked with bash {major}.{minor}):\n{proc.stderr.strip()}",
-                    file=sys.stderr,
-                )
-            else:
-                errors.append(f"Syntax error in compiled bash script:\n{proc.stderr.strip()}")
-    except FileNotFoundError:
-        # bash not installed on host, skip bash -n
-        pass
+    if check_syntax:
+        bash_path, (major, minor) = resolve_bash()
+        try:
+            proc = subprocess.run(
+                [bash_path, "-n"],
+                input=compiled,
+                text=True,
+                capture_output=True,
+            )
+            if proc.returncode != 0:
+                if major > 0 and major < 4:
+                    import sys
+                    print(
+                        f"WARNING: Syntax warning in compiled bash script (checked with bash {major}.{minor}):\n{proc.stderr.strip()}",
+                        file=sys.stderr,
+                    )
+                else:
+                    errors.append(f"Syntax error in compiled bash script:\n{proc.stderr.strip()}")
+        except FileNotFoundError:
+            # bash not installed on host, skip bash -n
+            pass
 
     return compiled, errors
 
 
-def compile_collect_script(job: Job) -> tuple[str, list[str]]:
+def compile_collect_script(job: Job, check_syntax: bool = True) -> tuple[str, list[str]]:
     """
     Compile host-side reader script template.
     Returns:
@@ -164,24 +165,25 @@ def compile_collect_script(job: Job) -> tuple[str, list[str]]:
 
     compiled = template.replace("__RES_FILE__", shlex.quote(res_file))
 
-    bash_path, (major, minor) = resolve_bash()
-    try:
-        proc = subprocess.run(
-            [bash_path, "-n"],
-            input=compiled,
-            text=True,
-            capture_output=True,
-        )
-        if proc.returncode != 0:
-            if major > 0 and major < 4:
-                import sys
-                print(
-                    f"WARNING: Syntax warning in compiled collect script (checked with bash {major}.{minor}):\n{proc.stderr.strip()}",
-                    file=sys.stderr,
-                )
-            else:
-                errors.append(f"Syntax error in compiled collect script:\n{proc.stderr.strip()}")
-    except FileNotFoundError:
-        pass
+    if check_syntax:
+        bash_path, (major, minor) = resolve_bash()
+        try:
+            proc = subprocess.run(
+                [bash_path, "-n"],
+                input=compiled,
+                text=True,
+                capture_output=True,
+            )
+            if proc.returncode != 0:
+                if major > 0 and major < 4:
+                    import sys
+                    print(
+                        f"WARNING: Syntax warning in compiled collect script (checked with bash {major}.{minor}):\n{proc.stderr.strip()}",
+                        file=sys.stderr,
+                    )
+                else:
+                    errors.append(f"Syntax error in compiled collect script:\n{proc.stderr.strip()}")
+        except FileNotFoundError:
+            pass
 
     return compiled, errors

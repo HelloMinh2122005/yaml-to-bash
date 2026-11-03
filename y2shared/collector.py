@@ -6,6 +6,7 @@ import re
 import time
 from typing import Any
 
+from y2shared.aztrace import RECORDER
 from y2shared.config import Job
 from y2shared.dispatcher import RemoteResult
 from y2shared.inputcsv import VMRow, to_env_var_name
@@ -100,7 +101,13 @@ def collect_for_vm(
                 env=env,
                 timeout=col.timeout,
                 cwd=job.yaml_dir,
+                trace_section="column",
+                trace_name=col.column,
             )
+            if logger and res.az_calls:
+                for call in res.az_calls:
+                    logger.log_az_script(call.section, call.name, call.rc, call.argv)
+                    RECORDER.record_script(row.index, call.section, call.name, call.rc, call.argv)
             if res.timed_out:
                 val = "ERROR:column:timeout"
                 if logger:

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Pass-through az wrapper for TP-62
+# Strips its own directory from PATH, calls the next az,
+# and after the first successful POST .../runCommand sends SIGINT to $PPID.
+
+set -u
+
+shim_dir="$(cd "$(dirname "$0")" && pwd)"
+old_path="${PATH:-}"
+
+# Strip self from PATH
+new_path=""
+old_ifs="$IFS"
+IFS=":"
+for entry in $old_path; do
+  if [ -n "$entry" ] && [ "$entry" != "$shim_dir" ]; then
+    if [ -z "$new_path" ]; then
+      new_path="$entry"
+    else
+      new_path="$new_path:$entry"
+    fi
+  fi
+done
+IFS="$old_ifs"
+
+real=""
+if [ -n "$new_path" ]; then
+  real=$(PATH="$new_path" command -v az 2>/dev/null)
+fi
+
+if [ -z "$real" ]; then
+  echo "az: command not found" >&2
+  exit 127
+fi
+
+# Execute next az
+PATH="$new_path" "$real" "$@"
+rc=$?
+
+# Check if this was a runCommand POST and succeeded
+is_post_runcommand=0
+case "$*" in
+  *rest*runCommand*post*|*rest*runCommand*POST*|*rest*POST*runCommand*|*rest*post*runCommand*)
+    is_post_runcommand=1
+    ;;
+esac
+
+if [ "$rc" -eq 0 ] && [ "$is_post_runcommand" -eq 1 ]; then
+  marker="${Y2_SIGINT_MARKER:-/tmp/y2_t3_sigint_sent}"
+  if [ ! -f "$marker" ]; then
+    touch "$marker"
+    echo "[sigint-shim] First successful runCommand POST detected. Sending SIGINT to parent PID $PPID" >&2
+    kill -INT "$PPID"
+  fi
+fi
+
+exit "$rc"
+

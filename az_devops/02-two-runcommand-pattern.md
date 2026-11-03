@@ -42,6 +42,7 @@ The reader is read-only and idempotent. Repeating it is harmless, and this is wh
 │   y2b run job.yaml --phase collect -y                                │
 │     • run-command #2 (reader) per invoked VM, STILL_RUNNING retries  │
 │     • computed columns (bash on agent)                               │
+│     • Phase 3: post_run hooks and power restore (deallocate/stop)    │
 │     • merge → result.csv / result.log in input order                 │
 │   publish result.csv, result.log                                     │
 │   if still_running: tar .result.parts → "y2-state-collect-<attempt>" │
@@ -55,7 +56,7 @@ The reader is read-only and idempotent. Repeating it is harmless, and this is wh
 | State | Written by | Read back on `--resume` by |
 |-------|-----------|----------------------------|
 | `run.json` → `run_id`, `job_hash`, `phase` | `init_parts_dir` ([parts.py](../y2shared/parts.py)) | `init_parts_dir(resume=True)`: refuses if `job_hash` differs, otherwise returns the **same `run_id`**, so the reader's `__Y2B_RUN__` check matches |
-| `collect_list.jsonl` → one record per fired VM with `invoked_at`, `confirmed` | Phase 1, before and after each invoke | `CollectList.load()` → Phase 2 work set |
+| `collect_list.jsonl` → one record per fired VM with `invoked_at`, `confirmed` | Phase 1 (Invoke always creates the ledger, even on early exit or abort) | `CollectList.load()` → Phase 2 work set |
 | `NNNN-<vm>.csv/.log` part files | prechecks (SKIPPED/ENDED), invoke errors, collect | `is_part_finished` / merger |
 
 None of these files store absolute paths, so the collect job can unpack them on a different agent with a different `_work/N/s` directory.
@@ -79,6 +80,8 @@ y2b|y2p run JOB.yaml [--phase all|invoke|collect]     (default: all = today's be
 | `collect` | Implies `--resume`. Requires `run.json` + `collect_list.jsonl`. **Skips Phase 1 entirely**: rows with no ledger record and no part file are left to the merger, which marks them `ERROR:no_result`. Run Phase 2 and merge | `0` / `2` / `3` as today |
 
 The key rule is **`collect` never invokes**. With today's `--resume`, rows missing from the ledger are fired again ([runner.py:401-410](../y2shared/runner.py#L401-L410)). In a pipeline, a collect job that might also fire would break "≤ 1 invoke per VM per run". With `--phase collect` the guarantee holds by construction.
+
+Furthermore, **collect includes Phase 3 (`post_run`, power restore)**. Once results are read, Phase 3 executes per-VM post-run hooks and restores VM power states (e.g. `deallocate` for VMs started under `action: start-stop`). This enables the **aborted-invoke restore path (`--phase collect` after exit 3)**: if `--phase invoke` exits with code 3 (e.g., due to an auth breaker or Ctrl-C interrupt after some VMs were already started and fired), running `--phase collect` will safely restore power for any started VMs, reading output and completing deallocations.
 
 ### Where it goes
 
@@ -112,7 +115,7 @@ Collect  ──(stillRunning == true)──► Wait2 (Delay@1, e.g. 15m) ──�
 | What failed | What ADO shows | What to do | Run-commands added |
 |-------------|----------------|------------|--------------------|
 | Invoke job: config/CSV error (exit 1) | Invoke failed, no state | Fix `job.yaml`/CSV, run a **new pipeline run** | 0 |
-| Invoke job: auth breaker (exit 3) | Invoke failed; state artifact published (`always()`) | Fix the service connection. **New run** recommended, see note | VMs fired before the abort have already run once |
+| Invoke job: auth breaker (exit 3) | Invoke failed; state artifact published (`always()`) | Fix service connection or trigger collect: the aborted-invoke restore path (`--phase collect` after exit 3) ensures collect includes Phase 3 (`post_run`, power restore) to deallocate any VMs started before the abort | VMs fired before the abort have already run once |
 | Agentless Delay cancelled | Wait cancelled | "Rerun failed jobs" → Delay → Collect | 0 |
 | Collect job: auth/agent lost (exit 3) | Collect failed | **"Rerun failed jobs"**: re-downloads the *invoke* state and collects again (the reader is idempotent) | 1 reader per VM, no re-fire |
 | Collect finished with `ERROR:still_running` (exit 2) | SucceededWithIssues | Optional Collect2 stage, or later: a manual pipeline that downloads `y2-state-collect-*` and runs `--phase collect` | 1 reader per still-running VM |

@@ -81,34 +81,8 @@ early_cleanup() {
 }
 trap early_cleanup EXIT INT TERM
 
-# 2. Check service principal config
+# 2. Check service principal config (fallback to active az login if not present)
 SP_ENV="$Y2_LAB_CONFIG_DIR/sp.env"
-if [ ! -f "$SP_ENV" ]; then
-    echo "Config error: service principal file not found at $SP_ENV" >&2
-    exit 78
-fi
-
-AZURE_CLIENT_ID=""
-AZURE_TENANT_ID=""
-AZURE_CLIENT_SECRET=""
-
-while IFS='=' read -r key val || [ -n "$key" ]; do
-    key=$(printf '%s\n' "$key" | tr -d ' \t\r\n')
-    val=$(printf '%s\n' "$val" | sed -e 's/^[ \t]*//' -e 's/[ \t\r\n]*$//' -e 's/^["'\'']//' -e 's/["'\'']$//')
-    case "$key" in
-        AZURE_CLIENT_ID) AZURE_CLIENT_ID="$val" ;;
-        AZURE_TENANT_ID) AZURE_TENANT_ID="$val" ;;
-        AZURE_CLIENT_SECRET) AZURE_CLIENT_SECRET="$val" ;;
-    esac
-done < "$SP_ENV"
-
-if [ -z "$AZURE_CLIENT_ID" ] || [ -z "$AZURE_TENANT_ID" ] || [ -z "$AZURE_CLIENT_SECRET" ]; then
-    echo "Config error: missing required AZURE_* credentials in $SP_ENV" >&2
-    exit 78
-fi
-
-export AZURE_CONFIG_DIR="$Y2_LAB_CONFIG_DIR/azure"
-mkdir -p "$AZURE_CONFIG_DIR"
 
 # Resolve real az CLI before putting shim on PATH
 if [ -n "${Y2_REAL_AZ:-}" ]; then
@@ -138,15 +112,39 @@ mkdir -p "$EVIDENCE_DIR"
 RUN_LOG="$EVIDENCE_DIR/run.log"
 touch "$RUN_LOG"
 
-# 3. SP login
-# Note: -p exposes the secret in the process list briefly on this single-user machine.
-echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Authenticating service principal $AZURE_CLIENT_ID" >> "$RUN_LOG"
-if ! "$Y2_REAL_AZ" login --service-principal \
-    -u "$AZURE_CLIENT_ID" \
-    -p "$AZURE_CLIENT_SECRET" \
-    --tenant "$AZURE_TENANT_ID" \
-    -o none >/dev/null 2>&1; then
-    echo "Login error: az login --service-principal failed" >&2
+if [ -f "$SP_ENV" ]; then
+    AZURE_CLIENT_ID=""
+    AZURE_TENANT_ID=""
+    AZURE_CLIENT_SECRET=""
+
+    while IFS='=' read -r key val || [ -n "$key" ]; do
+        key=$(printf '%s\n' "$key" | tr -d ' \t\r\n')
+        val=$(printf '%s\n' "$val" | sed -e 's/^[ \t]*//' -e 's/[ \t\r\n]*$//' -e 's/^["'\x27']//' -e 's/["'\x27']$//')
+        case "$key" in
+            AZURE_CLIENT_ID) AZURE_CLIENT_ID="$val" ;;
+            AZURE_TENANT_ID) AZURE_TENANT_ID="$val" ;;
+            AZURE_CLIENT_SECRET) AZURE_CLIENT_SECRET="$val" ;;
+        esac
+    done < "$SP_ENV"
+
+    if [ -n "$AZURE_CLIENT_ID" ] && [ "$AZURE_CLIENT_ID" != "<appId>" ]; then
+        export AZURE_CONFIG_DIR="$Y2_LAB_CONFIG_DIR/azure"
+        mkdir -p "$AZURE_CONFIG_DIR"
+
+        echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Authenticating service principal $AZURE_CLIENT_ID" >> "$RUN_LOG"
+        if ! "$Y2_REAL_AZ" login --service-principal \
+            -u "$AZURE_CLIENT_ID" \
+            -p "$AZURE_CLIENT_SECRET" \
+            --tenant "$AZURE_TENANT_ID" \
+            -o none >/dev/null 2>&1; then
+            echo "Login error: az login --service-principal failed" >&2
+            exit 78
+        fi
+    else
+        echo "Using active Azure CLI login" >> "$RUN_LOG"
+    fi
+else
+    echo "Config error: service principal file not found at $SP_ENV" >&2
     exit 78
 fi
 

@@ -30,6 +30,76 @@ state_dir = os.environ.get("FAKE_AZ_STATE_DIR", "/tmp/fake_az_state")
 os.makedirs(state_dir, exist_ok=True)
 
 
+def classify_kind(argv):
+    if len(argv) >= 2 and argv[0] == "account" and argv[1] == "show":
+        return "sub-resolve"
+    if "vm" in argv and "get-instance-view" in argv:
+        return "power-state"
+    if "vm" in argv and "start" in argv:
+        return "vm-start"
+    if argv and argv[0] == "rest":
+        for i, a in enumerate(argv):
+            if a == "--url" and i + 1 < len(argv):
+                url = argv[i + 1]
+                if "/deallocate" in url:
+                    return "deallocate"
+                if "/powerOff" in url:
+                    return "powerOff"
+                if "/runCommand" in url:
+                    return "invoke"
+    if "run-command" in argv and "invoke" in argv:
+        if "--no-wait" in argv:
+            return "invoke"
+        return "reader"
+    return "other"
+
+
+def extract_vm(argv):
+    if "-n" in argv:
+        idx = argv.index("-n")
+        if idx + 1 < len(argv):
+            return argv[idx + 1]
+    if argv and argv[0] == "rest":
+        for i, a in enumerate(argv):
+            if a == "--url" and i + 1 < len(argv):
+                m = re.search(r"/virtualMachines/([^/?]+)", argv[i + 1])
+                if m:
+                    return m.group(1)
+    return None
+
+
+event_record = {
+    "vm": extract_vm(args),
+    "kind": classify_kind(args),
+    "outcome": "ok",
+    "rc": 0,
+}
+
+_orig_exit = sys.exit
+
+
+def az_exit(code=0):
+    rc = 0
+    if isinstance(code, int):
+        rc = code
+    elif code is not None:
+        rc = 1
+    event_record["rc"] = rc
+    if rc == 0 and event_record["outcome"] == "fail":
+        event_record["outcome"] = "ok"
+    events_path = os.environ.get("FAKE_AZ_EVENTS")
+    if events_path:
+        try:
+            with open(events_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(event_record) + "\n")
+        except Exception:
+            pass
+    _orig_exit(code)
+
+
+sys.exit = az_exit
+
+
 def get_counter(counter_name: str, env_key: str) -> int:
     counter_file = os.path.join(state_dir, f"{vm_name}_{counter_name}.txt")
     if not os.path.exists(counter_file):
@@ -89,9 +159,13 @@ if args[:1] == ["rest"]:
     if m_pwr:
         target_vm = m_pwr.group(3)
         act = m_pwr.group(4)
+        event_record["kind"] = act
+        event_record["vm"] = target_vm
         if os.environ.get(f"FAKE_AZ_POWER_FAIL_{target_vm}"):
+            event_record["outcome"] = "fail"
             sys.stderr.write(f"Power action {act} failed for {target_vm}\n")
             sys.exit(1)
+        event_record["outcome"] = "ok"
         if act == "deallocate":
             set_state(target_vm, "PowerState/deallocated")
             increment_counter(target_vm, "deallocate")
@@ -105,6 +179,7 @@ if args[:1] == ["rest"]:
         url,
     )
     if not m:
+        event_record["outcome"] = "fail"
         sys.stderr.write(f"Bad Request: unexpected az rest url {url}\n")
         sys.exit(1)
     with open(args[args.index("--body") + 1].lstrip("@"), "r", encoding="utf-8") as f:
@@ -119,6 +194,8 @@ if args[:1] == ["rest"]:
         "--command-id", body["commandId"], "--scripts", f"@{script_file}", "--no-wait",
     ]
     vm_name = m.group(3)
+    event_record["kind"] = "invoke"
+    event_record["vm"] = vm_name
 if "run-command" in args:
     if "--subscription" not in args:
         sys.stderr.write("FATAL: az command executed without --subscription flag\n")
@@ -134,9 +211,12 @@ if expected_cmd and "--command-id" in args:
 
 # Handle `az account show`
 if "account" in args and "show" in args:
+    event_record["kind"] = "sub-resolve"
     if os.environ.get("FAKE_AZ_ACCOUNT_FAIL"):
+        event_record["outcome"] = "fail"
         sys.stderr.write("Account show failed\n")
         sys.exit(1)
+    event_record["outcome"] = "ok"
     if "--query" in args and "id" in args:
         print("11111111-2222-3333-4444-555555555555")
         sys.exit(0)
@@ -145,9 +225,13 @@ if "account" in args and "show" in args:
 
 # Handle `az vm start`
 if "vm" in args and "start" in args:
+    event_record["kind"] = "vm-start"
+    event_record["vm"] = vm_name
     if os.environ.get("FAKE_AZ_START_FAIL") or (vm_name and os.environ.get(f"FAKE_AZ_START_FAIL_{vm_name}")):
+        event_record["outcome"] = "fail"
         sys.stderr.write("Failed to start VM\n")
         sys.exit(1)
+    event_record["outcome"] = "ok"
     if vm_name:
         set_state(vm_name, "PowerState/running")
         increment_counter(vm_name, "start")
@@ -155,6 +239,9 @@ if "vm" in args and "start" in args:
 
 # Handle `az vm get-instance-view`
 if "vm" in args and "get-instance-view" in args:
+    event_record["kind"] = "power-state"
+    event_record["vm"] = vm_name
+    event_record["outcome"] = "ok"
     if vm_name:
         increment_counter(vm_name, "get_instance_view")
         state = get_state(vm_name)
@@ -174,8 +261,33 @@ if "run-command" in args and "invoke" in args:
         drift = os.environ.get(f"FAKE_AZ_DRIFT_{vm_name}")
         if drift:
             set_state(vm_name, drift)
+    event_record["kind"] = "invoke" if "--no-wait" in args else "reader"
+    event_record["vm"] = vm_name
     # Check fixtures configuration
     mode = os.environ.get(f"FAKE_AZ_RC_{vm_name}", os.environ.get("FAKE_AZ_RC_DEFAULT", "success"))
+
+    if "--no-wait" in args:
+        post_throttle_key = f"FAKE_AZ_POST_THROTTLE_COUNT_{vm_name}"
+        if post_throttle_key in os.environ:
+            count = get_counter("post_throttle", post_throttle_key)
+            if count > 0:
+                decrement_counter("post_throttle")
+                event_record["outcome"] = "throttled"
+                sys.stderr.write("TooManyRequests: 429 Client Error: Throttled\n")
+                sys.exit(1)
+            else:
+                mode = "success"
+
+        post_busy_key = f"FAKE_AZ_POST_BUSY_COUNT_{vm_name}"
+        if post_busy_key in os.environ:
+            count = get_counter("post_busy", post_busy_key)
+            if count > 0:
+                decrement_counter("post_busy")
+                event_record["outcome"] = "conflict"
+                sys.stderr.write("Conflict: Operation in progress on VM\n")
+                sys.exit(1)
+            else:
+                mode = "success"
 
     # Throttled retry simulation (only for reader calls or when not no-wait)
     if "--no-wait" not in args:
@@ -184,6 +296,7 @@ if "run-command" in args and "invoke" in args:
             count = get_counter("throttle", throttle_count_key)
             if count > 0:
                 decrement_counter("throttle")
+                event_record["outcome"] = "throttled"
                 sys.stderr.write("TooManyRequests: 429 Client Error: Throttled\n")
                 sys.exit(1)
             else:
@@ -195,6 +308,7 @@ if "run-command" in args and "invoke" in args:
             count = get_counter("busy", busy_count_key)
             if count > 0:
                 decrement_counter("busy")
+                event_record["outcome"] = "conflict"
                 sys.stderr.write("Conflict: Operation in progress on VM\n")
                 sys.exit(1)
             else:
@@ -206,6 +320,7 @@ if "run-command" in args and "invoke" in args:
             count = get_counter("unknown", unknown_count_key)
             if count > 0:
                 decrement_counter("unknown")
+                event_record["outcome"] = "fail"
                 sys.stderr.write("TemporaryFailure: network blip\n")
                 sys.exit(1)
             else:
@@ -213,24 +328,31 @@ if "run-command" in args and "invoke" in args:
 
     # Handle basic error modes if requested explicitly via FAKE_AZ_RC
     if mode == "throttled":
+        event_record["outcome"] = "throttled"
         sys.stderr.write("TooManyRequests: 429 Client Error: Throttled\n")
         sys.exit(1)
     elif mode == "busy":
+        event_record["outcome"] = "conflict"
         sys.stderr.write("Conflict: Operation in progress on VM\n")
         sys.exit(1)
     elif mode == "agent":
+        event_record["outcome"] = "fail"
         sys.stderr.write("VMAgentStatusCommunicationError: VM Agent is not ready or responsive\n")
         sys.exit(1)
     elif mode == "missing":
+        event_record["outcome"] = "missing"
         sys.stderr.write("ResourceNotFound: The Resource 'Microsoft.Compute/virtualMachines/...' was not found\n")
         sys.exit(1)
     elif mode == "auth":
+        event_record["outcome"] = "auth"
         sys.stderr.write("AuthorizationFailed: AADSTS700016: Application was not found in directory. Run az login.\n")
         sys.exit(1)
     elif mode == "unknown":
+        event_record["outcome"] = "fail"
         sys.stderr.write("InternalServerError: Azure encountered an unexpected issue\n")
         sys.exit(1)
     elif mode == "truncated":
+        event_record["outcome"] = "ok"
         payload = {
             "value": [
                 {
@@ -247,6 +369,7 @@ if "run-command" in args and "invoke" in args:
         print(json.dumps(payload))
         sys.exit(0)
     elif mode == "no_marker":
+        event_record["outcome"] = "ok"
         payload = {
             "value": [
                 {
@@ -257,6 +380,7 @@ if "run-command" in args and "invoke" in args:
         print(json.dumps(payload))
         sys.exit(0)
     elif mode == "timeout":
+        event_record["outcome"] = "timeout"
         time.sleep(10)
         sys.exit(0)
 
@@ -285,9 +409,11 @@ if "run-command" in args and "invoke" in args:
     # Check async failure simulation (FAKE_AZ_ASYNC_<vm>)
     async_mode = os.environ.get(f"FAKE_AZ_ASYNC_{vm_name}", "")
     if async_mode == "agent":
+        event_record["outcome"] = "fail"
         sys.stderr.write("VMAgentStatusCommunicationError: VM Agent is not ready or responsive\n")
         sys.exit(1)
     elif async_mode == "never_started":
+        event_record["outcome"] = "ok"
         payload = {
             "value": [
                 {
@@ -302,6 +428,7 @@ if "run-command" in args and "invoke" in args:
         print(json.dumps(payload))
         sys.exit(0)
     elif async_mode == "killed":
+        event_record["outcome"] = "ok"
         run_file = os.path.join(state_dir, f"{vm_name}_run.json")
         run_id = os.environ.get("FAKE_AZ_RUN_ID", "preview")
         if os.path.exists(run_file):
@@ -325,6 +452,7 @@ if "run-command" in args and "invoke" in args:
         print(json.dumps(payload))
         sys.exit(0)
     elif async_mode == "stale":
+        event_record["outcome"] = "ok"
         b64_stale = base64.b64encode(b"stale-run-9999").decode("ascii")
         payload = {
             "value": [
@@ -354,6 +482,7 @@ if "run-command" in args and "invoke" in args:
             run_id = rdata.get("run_id", "preview")
             started_at = rdata.get("started_at", 0)
             if time.time() < started_at + runtime_sec:
+                event_record["outcome"] = "conflict"
                 sys.stderr.write("Conflict: Operation in progress on VM\n")
                 sys.exit(1)
 

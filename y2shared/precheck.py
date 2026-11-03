@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import shlex
 import threading
+import time
 from typing import Any, Callable
 
+from y2shared.azcmd import build_vm_start
+from y2shared.aztrace import RECORDER
 from y2shared.config import Job, Precheck
 from y2shared.inputcsv import VMRow
 from y2shared.shell import run_bash
@@ -16,7 +19,7 @@ class PrecheckEngine:
     """Evaluates sequential host-side prechecks with subscription caching and VM start support."""
 
     def __init__(self) -> None:
-        self._cache: dict[tuple[str, str], tuple[str, int, str]] = {}
+        self._cache: dict[tuple[str, str], tuple[str, int, str, str]] = {}
         self._cache_locks: dict[tuple[str, str], threading.Lock] = {}
         self._global_lock = threading.Lock()
 
@@ -26,13 +29,30 @@ class PrecheckEngine:
                 self._cache_locks[key] = threading.Lock()
             return self._cache_locks[key]
 
-    def _execute_script(self, precheck: Precheck, row: VMRow, yaml_dir) -> tuple[str, int, str]:
+    def _execute_script(
+        self,
+        precheck: Precheck,
+        row: VMRow,
+        yaml_dir,
+        logger: VMLogger | None = None,
+    ) -> tuple[str, int, str]:
         script_code = precheck.script or ""
         if precheck.script_path:
             with open(precheck.script_path, "r", encoding="utf-8") as sf:
                 script_code = sf.read()
 
-        res = run_bash(script_code, env=row.env, timeout=precheck.timeout, cwd=yaml_dir)
+        res = run_bash(
+            script_code,
+            env=row.env,
+            timeout=precheck.timeout,
+            cwd=yaml_dir,
+            trace_section="precheck",
+            trace_name=precheck.name,
+        )
+        if logger and res.az_calls:
+            for call in res.az_calls:
+                logger.log_az_script(call.section, call.name, call.rc, call.argv)
+                RECORDER.record_script(row.index, call.section, call.name, call.rc, call.argv)
         return res.stdout_stripped, res.rc, res.stderr
 
     def run_prechecks_for_vm(
@@ -62,15 +82,16 @@ class PrecheckEngine:
                 lock = self._get_lock_for_key(cache_key)
                 with lock:
                     if cache_key in self._cache:
-                        stdout, rc, stderr = self._cache[cache_key]
+                        stdout, rc, stderr, owner_vm = self._cache[cache_key]
                         logger.log(
                             f"Precheck '{precheck.name}' result retrieved from subscription cache for '{row.subscription}'"
                         )
+                        logger.log_az_note(f"script:precheck:{precheck.name} cached from {owner_vm}")
                     else:
-                        stdout, rc, stderr = self._execute_script(precheck, row, job.yaml_dir)
-                        self._cache[cache_key] = (stdout, rc, stderr)
+                        stdout, rc, stderr = self._execute_script(precheck, row, job.yaml_dir, logger=logger)
+                        self._cache[cache_key] = (stdout, rc, stderr, row.vm_name)
             else:
-                stdout, rc, stderr = self._execute_script(precheck, row, job.yaml_dir)
+                stdout, rc, stderr = self._execute_script(precheck, row, job.yaml_dir, logger=logger)
 
             # Match against result keys (keys normalized to strings in config) (A4)
             res_spec = None
@@ -119,11 +140,14 @@ class PrecheckEngine:
                 logger.log(
                     f"action '{action}' triggered for {row.vm_name} (RG: {row.resource_group}). Running az vm start..."
                 )
-                start_cmd = (
-                    f"az vm start --subscription {shlex.quote(row.subscription)} "
-                    f"-g {shlex.quote(row.resource_group)} -n {shlex.quote(row.vm_name)}"
-                )
-                start_res = run_bash(start_cmd, env=row.env, timeout=precheck.timeout, cwd=job.yaml_dir)
+                start_argv = build_vm_start(row.subscription, row.resource_group, row.vm_name)
+                start_cmd = " ".join(shlex.quote(a) for a in start_argv)
+                start_t0 = time.time()
+                start_res = run_bash(start_cmd, env=row.env, timeout=max(precheck.timeout, 300), cwd=job.yaml_dir)
+                start_dur = time.time() - start_t0
+                start_status = "SUCCESS" if start_res.rc == 0 else f"ERROR:start_failed:{precheck.name}"
+                logger.log_az_engine("vm-start", 1, start_res.rc, start_status, start_dur, start_argv)
+                RECORDER.record_engine(row.index, "vm-start", 1, start_res.rc, start_status, start_dur, start_argv)
                 if start_res.rc != 0:
                     logger.log_error(f"az vm start failed with rc={start_res.rc}: {start_res.stderr}")
                     return False, f"ERROR:start_failed:{precheck.name}"
@@ -132,7 +156,7 @@ class PrecheckEngine:
                     f"az vm start succeeded. Re-running precheck '{precheck.name}' once to confirm state..."
                 )
                 # Re-run the precheck once
-                re_stdout, re_rc, re_stderr = self._execute_script(precheck, row, job.yaml_dir)
+                re_stdout, re_rc, re_stderr = self._execute_script(precheck, row, job.yaml_dir, logger=logger)
                 re_spec = None
                 if re_stdout in precheck.result:
                     re_spec = precheck.result[re_stdout]

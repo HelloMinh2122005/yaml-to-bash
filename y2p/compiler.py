@@ -77,7 +77,7 @@ def _check_pwsh_syntax(script: str) -> list[str]:
     return errors
 
 
-def compile_job(job: Job, run_id: str = "preview") -> tuple[str, list[str]]:
+def compile_job(job: Job, run_id: str = "preview", check_syntax: bool = True) -> tuple[str, list[str]]:
     """
     Compile runcommand steps into a single composite PowerShell script.
     Returns:
@@ -138,13 +138,17 @@ def compile_job(job: Job, run_id: str = "preview") -> tuple[str, list[str]]:
         )
 
     # Check pwsh syntax if installed
-    pwsh_errors = _check_pwsh_syntax(compiled)
-    errors.extend(pwsh_errors)
+    if check_syntax:
+        pwsh_errors = _check_pwsh_syntax(compiled)
+        errors.extend(pwsh_errors)
 
     return compiled, errors
 
 
-def compile_collect_script(job: Job) -> tuple[str, list[str]]:
+compile_remote_powershell = compile_job
+
+
+def compile_collect_script(job: Job, check_syntax: bool = True) -> tuple[str, list[str]]:
     """
     Compile host-side PowerShell reader script template.
     Returns:
@@ -162,8 +166,9 @@ def compile_collect_script(job: Job) -> tuple[str, list[str]]:
 
     compiled = template.replace("__RES_FILE__", ps_quote(res_file))
 
-    pwsh_errors = _check_pwsh_syntax(compiled)
-    errors.extend(pwsh_errors)
+    if check_syntax:
+        pwsh_errors = _check_pwsh_syntax(compiled)
+        errors.extend(pwsh_errors)
 
     return compiled, errors
 
