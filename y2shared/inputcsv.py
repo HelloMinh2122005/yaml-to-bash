@@ -206,3 +206,18 @@ def read_input_csv(
 
     return rows, headers, ValidationResult(errors, warnings)
 
+
+def select_target_rows(
+    rows: list[VMRow],
+    vm_names: list[str] | set[str] | None = None,
+    limit: int | None = None,
+) -> list[VMRow]:
+    """Filter rows by VM names and/or apply limit."""
+    target_rows = list(rows)
+    if vm_names:
+        vm_set = set(vm_names)
+        target_rows = [r for r in target_rows if r.vm_name in vm_set]
+    if limit is not None and limit > 0:
+        target_rows = target_rows[:limit]
+    return target_rows
+

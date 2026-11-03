@@ -1,0 +1,24 @@
+{
+  "commit": "af5d69049f4d8daa02ee08bc22227a5118cc6755",
+  "fleet_20vm": {
+    "deallocate": 10,
+    "invoke": 20,
+    "power-state": 10,
+    "reader": 20,
+    "vm-start": 10
+  },
+  "linux_example": {
+    "deallocate": 3,
+    "invoke": 3,
+    "power-state": 6,
+    "reader": 3,
+    "sub-resolve": 1
+  },
+  "windows_example": {
+    "deallocate": 2,
+    "invoke": 2,
+    "power-state": 4,
+    "reader": 2,
+    "sub-resolve": 1
+  }
+}

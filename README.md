@@ -110,7 +110,40 @@ y2b compile examples/linux/job.yaml -o remote.sh
 y2p compile examples/windows/job.yaml -o remote.ps1
 ```
 
-### Execute Run
+### Inspect Execution Plan (`explain`)
+```bash
+# Display pure execution plan (pure dry run with zero subprocesses and zero Azure CLI calls)
+y2b explain examples/linux/job.yaml
+y2b explain examples/linux/job.yaml --format md -o plan.md
+y2b explain examples/linux/job.yaml --format json -o plan.json
+y2p explain examples/windows/job.yaml --vm win01 --limit 1
+```
+Available formats: `text` (default terminal text), `md` (GitHub-flavoured Markdown), `json` (machine-readable structure). Filtering via `--vm` and `--limit` is supported.
+
+### Two-Phase Execution (`--phase`)
+```bash
+# Phase 1 only (Invoke): run prechecks, start VMs if configured, fire run-command POSTs, record state
+y2b run examples/linux/job.yaml --phase invoke -y
+
+# Phase 2 & 3 (Collect): read results, run computed columns, execute post_run hooks, restore power, merge CSV/log
+y2b run examples/linux/job.yaml --phase collect -y
+
+# Full execution (default): Phase 1 followed immediately by Phase 2 & 3
+y2b run examples/linux/job.yaml --phase all -y
+```
+
+### Export Azure DevOps Pipelines (`export-ado`)
+```bash
+# Export production pipeline files to target directory (must be located inside the git repository)
+y2b export-ado examples/linux/job.yaml -o pipelines/generated/linux --service-connection sc-azure-lab --environment y2-lab
+y2p export-ado examples/windows/job.yaml -o pipelines/generated/windows --service-connection sc-azure-lab --environment y2-lab
+
+# Check for drift without modifying disk (exits 0 if up to date, 1 if differences exist)
+y2b export-ado examples/linux/job.yaml -o pipelines/generated/linux --service-connection sc-azure-lab --environment y2-lab --check
+```
+Configurable options: `--service-connection`, `--environment`, `--vm-image`, `--pool`, `--recollect-minutes`, `--check`.
+
+### Execute Run Options
 ```bash
 # Full execution across all target VMs
 y2b run examples/linux/job.yaml
@@ -134,11 +167,25 @@ y2p run examples/windows/job.yaml --resume
 y2b run examples/linux/job.yaml --keep-parts
 ```
 
+### Azure CLI Tracing & Secret Redaction
+Every Azure CLI call made by the engine or host scripts (`pre_run`, computed columns, `post_run`) is traced in `result.log`:
+- `[az] engine:<kind> attempt=<n> rc=<rc> status=<status> dur=<s>s :: <argv>`
+- `[az] script:<section>:<name> rc=<rc> dur=<s>s :: <argv>`
+
+**Redaction & Tracing Limitations:**
+- Secret parameters (`--password`, `--client-secret`, `--token`, `--sas-token`, `--account-key`) and their values are automatically redacted to `***`.
+- Note: Short flags such as `-p` are not redacted.
+- Note: Azure CLI called through an absolute path (e.g. `/usr/bin/az`) or `command -p az` is not traced because it bypasses the PATH shim.
+
+### Conformance Tracking & Azure DevOps Logging
+- At completion, the engine prints a plan conformance summary: `conformance: m/n VMs matched plan`. If any VM executes unexpected Azure CLI calls or fails to execute expected calls, deviations are logged to stderr and `result.log`.
+- Under Azure DevOps (`TF_BUILD=True` or `TF_BUILD=1`), console output organizes each VM's logs into collapsible groups (`##[group]<vm_name> · <outcome>` ... `##[endgroup]`). Any embedded `##vso[` markers in VM outputs are neutralised to prevent log injection, and plan mismatches emit `##vso[task.logissue type=warning]`.
+
 ### Exit Codes
-- `0`: All VMs completed successfully (`OK`), post hooks passed, power actions completed.
-- `1`: Configuration, YAML schema, or input CSV validation error.
-- `2`: Run finished, but some VMs had non-OK outcomes (`SKIPPED`, `ENDED`, or `ERROR`), post hooks / power actions failed, or VMs were left held/running remotely.
-- `3`: Run aborted (Ctrl-C, 5 consecutive authentication failures, or merge error).
+- `0`: All VMs completed successfully (`OK`), post hooks passed, power actions completed. In `--phase invoke`, indicates Phase 1 succeeded and emits `fired=<n>` on the last line.
+- `1`: Configuration, YAML schema, input CSV validation error, or `export-ado --check` drift detected.
+- `2`: Run finished, but some VMs had non-OK outcomes (`SKIPPED`, `ENDED`, or `ERROR:still_running`, etc.), post hooks / power actions failed, or VMs were left held/running remotely. Mapped to `SucceededWithIssues` in ADO pipelines.
+- `3`: Run aborted (Ctrl-C, 5 consecutive authentication failures, or unhandled error). In `--phase invoke`, the last stdout line is still `fired=<n>`; the saved state enables the aborted-invoke restore path via `--phase collect` to safely deallocate started VMs.
 
 ---
 

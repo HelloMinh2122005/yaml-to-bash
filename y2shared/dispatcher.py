@@ -21,14 +21,31 @@ from y2shared.config import Job
 from y2shared.inputcsv import VMRow
 from y2shared.vmlog import VMLogger
 
+from y2shared.aztrace import RECORDER
+from y2shared.azcmd import (
+    BUSY_RETRIES,
+    BUSY_WAIT_S,
+    COMPUTE_API_VERSION,
+    RUN_COMMAND_API_VERSION,
+    THROTTLE_BACKOFFS_S,
+    UNKNOWN_RETRY_WAIT_S,
+    KIND_DEALLOCATE,
+    KIND_INVOKE,
+    KIND_POWER_STATE,
+    KIND_POWEROFF,
+    KIND_READER,
+    KIND_SUB_RESOLVE,
+    KIND_VM_START,
+    build_power_post,
+    build_power_state,
+    build_reader_invoke,
+    build_run_command_post,
+    build_sub_resolve,
+)
+
 INVOKE_CALL_TIMEOUT = 300
 READER_CALL_TIMEOUT = 300
 
-# Phase 1 POSTs the runCommand action through `az rest` instead of `az vm run-command invoke --no-wait`:
-# `az rest` returns on the 202 Accepted without polling, on every azure-cli version, whereas `--no-wait`
-# exits 0 without sending the request before azure-cli 2.85.0 (Azure/azure-cli#32979).
-COMPUTE_API_VERSION = "2024-07-01"
-RUN_COMMAND_API_VERSION = COMPUTE_API_VERSION
 GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
@@ -218,6 +235,7 @@ def _az_run_command(
     circuit_breaker: AuthCircuitBreaker | None = None,
     delay_multiplier: float = 1.0,
     sleep_fn: Callable[[float], None] = time.sleep,
+    kind: str | None = None,
 ) -> tuple[str, int | None, str, str, int, float]:
     """
     Execute an Azure CLI command with standard retry and backoff loop.
@@ -232,7 +250,7 @@ def _az_run_command(
     az_env["AZURE_CORE_NO_COLOR"] = "1"
     az_env["AZURE_CORE_ONLY_SHOW_ERRORS"] = "1"
 
-    throttled_backoffs = [15, 30, 60, 120, 240]
+    throttled_backoffs = list(THROTTLE_BACKOFFS_S)
     throttled_attempt = 0
     busy_attempt = 0
     unknown_attempt = 0
@@ -244,6 +262,8 @@ def _az_run_command(
         total_attempts += 1
         logger.log_dispatch(f"Executing az command (attempt {total_attempts}): {' '.join(cmd[:6])}...")
 
+        attempt_start = time.time()
+
         try:
             proc = subprocess.run(
                 cmd,
@@ -254,25 +274,67 @@ def _az_run_command(
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as e:
+            attempt_dur = time.time() - attempt_start
             duration = time.time() - start_time
+            if kind and logger:
+                logger.log_az_engine(kind, total_attempts, "timeout", "ERROR:run_command_timeout", attempt_dur, cmd)
+                RECORDER.record_engine(logger.index, kind, total_attempts, "timeout", "ERROR:run_command_timeout", attempt_dur, cmd)
             logger.log_error(f"az command timed out after {timeout}s.")
             return "ERROR:run_command_timeout", None, "", (e.stderr or ""), total_attempts, duration
         except Exception as e:
+            attempt_dur = time.time() - attempt_start
             duration = time.time() - start_time
+            if kind and logger:
+                logger.log_az_engine(kind, total_attempts, 1, f"ERROR:internal:{type(e).__name__}", attempt_dur, cmd)
+                RECORDER.record_engine(logger.index, kind, total_attempts, 1, f"ERROR:internal:{type(e).__name__}", attempt_dur, cmd)
             logger.log_error(f"Failed to launch az CLI process: {e}")
             return f"ERROR:internal:{type(e).__name__}", None, "", str(e), total_attempts, duration
 
-        duration = time.time() - start_time
+        attempt_dur = time.time() - attempt_start
 
         if proc.returncode == 0:
+            if kind and logger:
+                logger.log_az_engine(kind, total_attempts, 0, "SUCCESS", attempt_dur, cmd)
+                RECORDER.record_engine(logger.index, kind, total_attempts, 0, "SUCCESS", attempt_dur, cmd)
             if circuit_breaker:
                 circuit_breaker.record_success()
+            duration = time.time() - start_time
             return "SUCCESS", 0, proc.stdout, proc.stderr, total_attempts, duration
 
         # Non-zero return code: classify error
         err_class = classify_error(proc.stderr, proc.returncode)
         first_stderr_line = (proc.stderr.strip().splitlines() or ["unknown"])[0][:80]
         logger.log_dispatch(f"Command failed (rc={proc.returncode}, class={err_class}): {first_stderr_line}")
+
+        # Determine attempt status
+        if err_class == "throttled" and throttled_attempt < len(throttled_backoffs):
+            attempt_status = "retry:throttled"
+        elif err_class == "busy":
+            if busy_policy == "return_busy":
+                attempt_status = "STILL_RUNNING"
+            elif busy_attempt < BUSY_RETRIES:
+                attempt_status = "retry:busy"
+            else:
+                attempt_status = "ERROR:run_command_busy"
+        elif err_class == "auth":
+            attempt_status = "ERROR:auth"
+        elif err_class == "agent":
+            attempt_status = "ERROR:vm_agent_unavailable"
+        elif err_class == "missing":
+            attempt_status = "ERROR:vm_not_found"
+        elif err_class == "throttled":
+            attempt_status = "ERROR:throttled"
+        else:
+            if unknown_attempt < 1:
+                attempt_status = "retry:unknown"
+            else:
+                attempt_status = f"ERROR:az:{first_stderr_line}"
+
+        if kind and logger:
+            logger.log_az_engine(kind, total_attempts, proc.returncode, attempt_status, attempt_dur, cmd)
+            RECORDER.record_engine(logger.index, kind, total_attempts, proc.returncode, attempt_status, attempt_dur, cmd)
+
+        duration = time.time() - start_time
 
         if err_class == "auth":
             if circuit_breaker:
@@ -304,9 +366,9 @@ def _az_run_command(
                 logger.log_dispatch("VM run-command busy (conflict); returning STILL_RUNNING.")
                 return "STILL_RUNNING", proc.returncode, proc.stdout, proc.stderr, total_attempts, duration
             else:
-                if busy_attempt < 3:
-                    wait_sec = 60 * delay_multiplier
-                    logger.log_dispatch(f"VM run-command busy (conflict). Waiting {wait_sec:.1f}s (retry {busy_attempt + 1}/3)...")
+                if busy_attempt < BUSY_RETRIES:
+                    wait_sec = BUSY_WAIT_S * delay_multiplier
+                    logger.log_dispatch(f"VM run-command busy (conflict). Waiting {wait_sec:.1f}s (retry {busy_attempt + 1}/{BUSY_RETRIES})...")
                     busy_attempt += 1
                     sleep_fn(wait_sec)
                     continue
@@ -316,7 +378,7 @@ def _az_run_command(
         else:
             # Unknown error: retry once after 30s
             if unknown_attempt < 1:
-                wait_sec = 30 * delay_multiplier
+                wait_sec = UNKNOWN_RETRY_WAIT_S * delay_multiplier
                 logger.log_dispatch(f"Unknown Azure error. Retrying once after {wait_sec:.1f}s...")
                 unknown_attempt += 1
                 sleep_fn(wait_sec)
@@ -333,7 +395,12 @@ class SubscriptionResolver:
         self._locks: dict[str, threading.Lock] = {}
         self._global_lock = threading.Lock()
 
-    def resolve(self, subscription: str, run_az: Callable[[list[str]], tuple]) -> tuple[str | None, str]:
+    def resolve(
+        self,
+        subscription: str,
+        run_az: Callable[..., tuple],
+        kind: str = KIND_SUB_RESOLVE,
+    ) -> tuple[str | None, str]:
         """Return (subscription_id, status); status is "SUCCESS" or an ERROR marker from run_az."""
         if GUID_RE.match(subscription):
             return subscription, "SUCCESS"
@@ -341,9 +408,11 @@ class SubscriptionResolver:
             lock = self._locks.setdefault(subscription, threading.Lock())
         with lock:
             if subscription not in self._ids:
-                status, _, stdout, _, _, _ = run_az(
-                    ["az", "account", "show", "--subscription", subscription, "--query", "id", "-o", "tsv"]
-                )
+                cmd = build_sub_resolve(subscription)
+                try:
+                    status, _, stdout, _, _, _ = run_az(cmd, kind=kind)
+                except TypeError:
+                    status, _, stdout, _, _, _ = run_az(cmd)
                 if status != "SUCCESS":
                     return None, status
                 if not GUID_RE.match(stdout.strip()):
@@ -382,7 +451,7 @@ def invoke_nowait(
     Returns:
         InvokeResult(success=True) on rc 0, or InvokeResult(success=False, error=marker).
     """
-    def run_az(cmd: list[str]) -> tuple:
+    def run_az(cmd: list[str], kind: str | None = None) -> tuple:
         return _az_run_command(
             cmd=cmd,
             timeout=timeout,
@@ -391,23 +460,18 @@ def invoke_nowait(
             circuit_breaker=circuit_breaker,
             delay_multiplier=delay_multiplier,
             sleep_fn=sleep_fn,
+            kind=kind,
         )
 
-    subscription_id, sub_status = SUBSCRIPTIONS.resolve(row.subscription, run_az)
+    subscription_id, sub_status = SUBSCRIPTIONS.resolve(row.subscription, run_az, kind=KIND_SUB_RESOLVE)
     if subscription_id is None:
         logger.log_error(f"Cannot resolve subscription '{row.subscription}' to an ID ({sub_status})")
         return InvokeResult(success=False, error=sub_status)
 
     body_path = write_invoke_body(remote_script_path, command_id)
-    url = (
-        f"/subscriptions/{subscription_id}"
-        f"/resourceGroups/{urllib.parse.quote(row.resource_group, safe='')}"
-        f"/providers/Microsoft.Compute/virtualMachines/{urllib.parse.quote(row.vm_name, safe='')}"
-        f"/runCommand?api-version={RUN_COMMAND_API_VERSION}"
-    )
-    cmd = ["az", "rest", "--method", "post", "--url", url, "--body", f"@{body_path}"]
+    cmd = build_run_command_post(subscription_id, row.resource_group, row.vm_name, body_path)
 
-    status, rc, stdout, stderr, attempts, duration = run_az(cmd)
+    status, rc, stdout, stderr, attempts, duration = run_az(cmd, kind=KIND_INVOKE)
 
     if status == "SUCCESS":
         logger.log_dispatch(f"runCommand POST accepted in {duration:.1f}s (fire and forget).")
@@ -442,21 +506,7 @@ def get_power_state(
         (power_state, error_marker)
         e.g. ("PowerState/running", "") or ("", "ERROR:vm_not_found")
     """
-    cmd = [
-        "az",
-        "vm",
-        "get-instance-view",
-        "--subscription",
-        row.subscription,
-        "-g",
-        row.resource_group,
-        "-n",
-        row.vm_name,
-        "--query",
-        "instanceView.statuses[?starts_with(code, 'PowerState/')].code",
-        "-o",
-        "tsv",
-    ]
+    cmd = build_power_state(row.subscription, row.resource_group, row.vm_name)
     status, rc, stdout, stderr, attempts, duration = _az_run_command(
         cmd=cmd,
         timeout=timeout,
@@ -465,6 +515,7 @@ def get_power_state(
         circuit_breaker=circuit_breaker,
         delay_multiplier=delay_multiplier,
         sleep_fn=sleep_fn,
+        kind=KIND_POWER_STATE,
     )
     if status == "SUCCESS":
         st = stdout.strip()
@@ -493,7 +544,7 @@ def power_action_nowait(
     """
     vmlog = logger or VMLogger(row.vm_name, row.index)
 
-    def run_az(cmd: list[str]) -> tuple:
+    def run_az(cmd: list[str], kind: str | None = None) -> tuple:
         return _az_run_command(
             cmd=cmd,
             timeout=timeout,
@@ -502,6 +553,7 @@ def power_action_nowait(
             circuit_breaker=circuit_breaker,
             delay_multiplier=delay_multiplier,
             sleep_fn=sleep_fn,
+            kind=kind,
         )
 
     if action == "powerOff":
@@ -517,19 +569,14 @@ def power_action_nowait(
             vmlog.log(f"VM {row.vm_name} is already {state}; skipping powerOff.")
             return True, "already_stopped"
 
-    subscription_id, sub_status = SUBSCRIPTIONS.resolve(row.subscription, run_az)
+    subscription_id, sub_status = SUBSCRIPTIONS.resolve(row.subscription, run_az, kind=KIND_SUB_RESOLVE)
     if subscription_id is None:
         vmlog.log_error(f"Cannot resolve subscription '{row.subscription}' to an ID ({sub_status})")
         return False, sub_status
 
-    url = (
-        f"/subscriptions/{subscription_id}"
-        f"/resourceGroups/{urllib.parse.quote(row.resource_group, safe='')}"
-        f"/providers/Microsoft.Compute/virtualMachines/{urllib.parse.quote(row.vm_name, safe='')}"
-        f"/{action}?api-version={COMPUTE_API_VERSION}"
-    )
-    cmd = ["az", "rest", "--method", "post", "--url", url]
-    status, rc, stdout, stderr, attempts, duration = run_az(cmd)
+    cmd = build_power_post(subscription_id, row.resource_group, row.vm_name, action)
+    p_kind = KIND_DEALLOCATE if action == "deallocate" else KIND_POWEROFF
+    status, rc, stdout, stderr, attempts, duration = run_az(cmd, kind=p_kind)
     if status == "SUCCESS":
         vmlog.log(f"Power action '{action}' accepted in {duration:.1f}s.")
         return True, "SUCCESS"
@@ -556,24 +603,13 @@ def read_results(
     Read results from VM by executing collect.sh synchronously.
     Handles STILL_RUNNING on busy conflict, checks RUN_ID and DONE markers.
     """
-    cmd = [
-        "az",
-        "vm",
-        "run-command",
-        "invoke",
-        "--subscription",
+    cmd = build_reader_invoke(
         row.subscription,
-        "-g",
         row.resource_group,
-        "-n",
         row.vm_name,
-        "--command-id",
         command_id,
-        "--scripts",
-        f"@{collect_script_path}",
-        "-o",
-        "json",
-    ]
+        collect_script_path,
+    )
 
     status, rc, stdout, stderr, attempts, duration = _az_run_command(
         cmd=cmd,
@@ -583,6 +619,7 @@ def read_results(
         circuit_breaker=circuit_breaker,
         delay_multiplier=delay_multiplier,
         sleep_fn=sleep_fn,
+        kind=KIND_READER,
     )
 
     if status == "STILL_RUNNING":

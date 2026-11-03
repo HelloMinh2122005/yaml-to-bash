@@ -127,10 +127,50 @@ def build_parser(profile: Profile) -> argparse.ArgumentParser:
     p_run.add_argument(
         "--keep-parts", action="store_true", help="Keep temporary parts folder after merge"
     )
+    p_run.add_argument(
+        "--phase",
+        choices=["all", "invoke", "collect"],
+        default="all",
+        help="Execution phase: all (default), invoke (Phase 1 only), or collect (Phase 2 & 3)",
+    )
     p_run.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     p_run.set_defaults(func=lambda args: cmd_run(args, profile))
 
+    # explain
+    from y2shared.explain import cmd_explain
+
+    p_explain = subparsers.add_parser("explain", help="Show static Azure operations plan for a job")
+    p_explain.add_argument("job_yaml", help="Path to job YAML file")
+    p_explain.add_argument("--vm", action="append", default=[], help="Filter by VM name (repeatable)")
+    p_explain.add_argument("--limit", type=int, default=None, help="Limit number of VMs to explain")
+    p_explain.add_argument(
+        "--format",
+        choices=["text", "md", "json"],
+        default="text",
+        help="Output format: text (default), md, or json",
+    )
+    p_explain.add_argument("-o", "--output", help="Write plan to file instead of stdout")
+    p_explain.set_defaults(func=lambda args: cmd_explain(args, profile))
+
+    # export-ado
+    p_export = subparsers.add_parser("export-ado", help="Export Azure DevOps pipeline for a job")
+    p_export.add_argument("job_yaml", help="Path to job YAML file")
+    p_export.add_argument("-o", "--output", required=True, help="Output directory inside repository")
+    p_export.add_argument("--service-connection", required=True, help="Azure service connection name")
+    p_export.add_argument("--environment", required=True, help="Azure DevOps environment name")
+    grp = p_export.add_mutually_exclusive_group()
+    grp.add_argument("--vm-image", help="Virtual machine image (default: ubuntu-latest)")
+    grp.add_argument("--pool", help="Private agent pool name")
+    p_export.add_argument("--recollect-minutes", type=int, default=0, help="Wait time before recollect")
+    p_export.add_argument("--check", action="store_true", help="Verify generated pipeline without writing")
+    p_export.set_defaults(func=lambda args: _dispatch_export_ado(args, profile))
+
     return parser
+
+
+def _dispatch_export_ado(args: argparse.Namespace, profile: Profile) -> int:
+    from y2shared.export_ado import cmd_export_ado
+    return cmd_export_ado(args, profile)
 
 
 def main(profile: Profile, argv: list[str] | None = None) -> int:

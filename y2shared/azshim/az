@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# bash 3.2 compatible shim for tracing host-script az invocations (AC-12, ADR-003)
+
+shim_dir="${Y2_AZ_SHIM_DIR:-}"
+old_path="${PATH:-}"
+trace_file="${Y2_AZ_TRACE_FILE:-}"
+ctx="${Y2_AZ_TRACE_CTX:-}"
+
+# Strip $Y2_AZ_SHIM_DIR from PATH
+new_path=""
+old_ifs="$IFS"
+IFS=":"
+for entry in $old_path; do
+  if [ -n "$entry" ] && [ "$entry" != "$shim_dir" ]; then
+    if [ -z "$new_path" ]; then
+      new_path="$entry"
+    else
+      new_path="$new_path:$entry"
+    fi
+  fi
+done
+IFS="$old_ifs"
+
+# Resolve next az
+real=""
+if [ -n "$new_path" ]; then
+  real=$(PATH="$new_path" command -v az 2>/dev/null)
+fi
+
+if [ -z "$real" ]; then
+  if [ -n "$trace_file" ]; then
+    printf '%s\0' "$ctx" "127" "$#" "$@" >> "$trace_file" 2>/dev/null
+  fi
+  echo "az: command not found" >&2
+  exit 127
+fi
+
+PATH="$new_path" "$real" "$@"
+rc=$?
+
+if [ -n "$trace_file" ]; then
+  printf '%s\0' "$ctx" "$rc" "$#" "$@" >> "$trace_file" 2>/dev/null
+fi
+
+exit "$rc"
+

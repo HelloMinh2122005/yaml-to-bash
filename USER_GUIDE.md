@@ -27,10 +27,16 @@ This guide is a complete, step-by-step reference for operators, systems engineer
    - [7.3 Safe Dry-Run: `--dry-run`](#73-safe-dry-run---dry-run)
    - [7.4 Production Run: `run`](#74-production-run-run)
    - [7.5 Resuming Interrupted Runs: `--resume`](#75-resuming-interrupted-runs---resume)
+   - [7.6 Inspect Execution Plan: `y2b explain` / `y2p explain`](#76-inspect-execution-plan-y2b-explain--y2p-explain)
+   - [7.7 Two-Phase Execution: `run --phase`](#77-two-phase-execution-run---phase)
+   - [7.8 Export Azure DevOps Pipelines: `export-ado`](#78-export-azure-devops-pipelines-export-ado)
 8. [Understanding Outputs & Logs](#8-understanding-outputs--logs)
    - [The Final Report (`result.csv`)](#the-final-report-resultcsv)
    - [The Consolidated Log (`result.log`)](#the-consolidated-log-resultlog)
+   - [Azure CLI Tracing & Secret Redaction](#azure-cli-tracing--secret-redaction)
+   - [Conformance Tracking & Azure DevOps Log Groups](#conformance-tracking--azure-devops-log-groups)
    - [Outcome Markers Reference](#outcome-markers-reference)
+   - [CLI Exit Codes](#cli-exit-codes)
 9. [Operational Best Practices & Troubleshooting](#9-operational-best-practices--troubleshooting)
    - [Handling 4 KB Output Limits](#handling-4-kb-output-limits)
    - [Handling ARM Throttling & Concurrency](#handling-arm-throttling--concurrency)
@@ -658,6 +664,47 @@ y2b run examples/linux/job.yaml --resume
 y2p run examples/windows/job.yaml --resume
 ```
 
+### 7.6 Inspect Execution Plan: `y2b explain` / `y2p explain`
+Inspects the full execution plan deterministically without running any subprocesses and without making any Azure CLI calls:
+```bash
+# Print plan to stdout (terminal text)
+y2b explain examples/linux/job.yaml
+
+# Export Markdown report (e.g. for ADO summary)
+y2b explain examples/linux/job.yaml --format md -o plan.md
+
+# Export structured JSON
+y2b explain examples/linux/job.yaml --format json -o plan.json
+
+# Filter to specific VMs or limit count
+y2p explain examples/windows/job.yaml --vm win01 --limit 1
+```
+
+### 7.7 Two-Phase Execution: `run --phase`
+Enables splitting the execution into separate invocation and collection phases for CI/CD pipelines (e.g. Azure DevOps) to allow agentless waiting:
+```bash
+# Phase 1 only (Invoke): fires run-command on VMs, saves state to parts dir, prints fired=<n> on exit 0 or 3
+y2b run examples/linux/job.yaml --phase invoke -y
+
+# Phase 2 & 3 (Collect): reads results from fired VMs, runs computed columns, executes post_run hooks, restores power, and merges output
+y2b run examples/linux/job.yaml --phase collect -y
+
+# Both phases sequentially (default)
+y2b run examples/linux/job.yaml --phase all -y
+```
+
+### 7.8 Export Azure DevOps Pipelines: `export-ado`
+Generates production Azure DevOps pipeline YAML and templates from a `job.yaml` configuration:
+```bash
+# Export self-contained pipeline files into target directory (must be within git repository root)
+y2b export-ado examples/linux/job.yaml -o pipelines/generated/linux --service-connection sc-azure-lab --environment y2-lab
+y2p export-ado examples/windows/job.yaml -o pipelines/generated/windows --service-connection sc-azure-lab --environment y2-lab
+
+# Verify committed pipeline files against specification without writing changes
+y2b export-ado examples/linux/job.yaml -o pipelines/generated/linux --service-connection sc-azure-lab --environment y2-lab --check
+```
+Options include `--service-connection`, `--environment`, `--vm-image`, `--pool`, `--recollect-minutes`, and `--check`.
+
 ---
 
 ## 8. Understanding Outputs & Logs
@@ -697,6 +744,22 @@ Final outcome: OK
 ==================================================
 ```
 
+### Azure CLI Tracing & Secret Redaction
+
+Every `az` command invoked by the engine or host scripts (`pre_run`, computed columns, `post_run`) is logged to `result.log`:
+- `[az] engine:<kind> attempt=<n> rc=<rc> status=<status> dur=<s>s :: <argv>`
+- `[az] script:<section>:<name> rc=<rc> dur=<s>s :: <argv>`
+
+**Redaction & Tracing Boundaries:**
+- All secret parameters (`--password`, `--client-secret`, `--token`, `--sas-token`, `--account-key`) and their values are automatically redacted to `***`.
+- Note: Short flags such as `-p` are not redacted.
+- Note: Any Azure CLI call invoked through an absolute path (e.g. `/usr/bin/az`) or `command -p az` is not traced because it bypasses the PATH shim.
+
+### Conformance Tracking & Azure DevOps Log Groups
+
+- At the conclusion of a run, the engine reports: `conformance: m/n VMs matched plan`. If any VM executes extra or missing Azure CLI calls compared to the precomputed plan, deviations are reported to stderr and `result.log`.
+- When executed in an Azure DevOps environment (`TF_BUILD=True` or `TF_BUILD=1`), console output organizes per-VM lines into collapsible blocks using `##[group]<vm_name> · <outcome>` and `##[endgroup]`. Embedded `##vso[` markers from guest outputs are neutralised to prevent log manipulation. Any conformance mismatch triggers `##vso[task.logissue type=warning]`.
+
 ### Outcome Markers Reference
 
 When a VM does not finish with `OK`, non-passthrough columns carry an outcome marker:
@@ -723,10 +786,10 @@ When a VM does not finish with `OK`, non-passthrough columns carry an outcome ma
 
 | Exit Code | Meaning | Details |
 |---|---|---|
-| `0` | All OK | Every VM finished with `OK`, all post hooks succeeded, and power actions completed. |
-| `1` | Configuration Error | YAML syntax error, schema violation, or input CSV validation failure. |
-| `2` | Non-OK Outcomes / Failures / Held VMs | Run finished, but one or more VMs had `SKIPPED`, `ENDED`, or `ERROR` outcomes, or a post hook / power action failed, or VMs were left still running remotely. |
-| `3` | Fatal / Aborted | Run interrupted by user (SIGINT / Ctrl-C), Auth Circuit Breaker tripped (5 consecutive auth failures), or CSV merge error. |
+| `0` | All OK | Every VM finished with `OK`, all post hooks succeeded, and power actions completed. In `--phase invoke`, indicates Phase 1 succeeded and emits `fired=<n>` on the last line. |
+| `1` | Configuration Error | YAML syntax error, schema violation, input CSV validation failure, or `export-ado --check` drift detected. |
+| `2` | Non-OK Outcomes / Failures / Held VMs | Run finished, but one or more VMs had `SKIPPED`, `ENDED`, or `ERROR` outcomes, or a post hook / power action failed, or VMs were left still running remotely. Mapped to `SucceededWithIssues` in ADO pipelines. |
+| `3` | Fatal / Aborted | Run interrupted by user (SIGINT / Ctrl-C), Auth Circuit Breaker tripped (5 consecutive auth failures), or CSV merge error. In `--phase invoke`, the last stdout line is still `fired=<n>`; the saved state enables the aborted-invoke restore path via `--phase collect` to safely deallocate started VMs. |
 
 ---
 
