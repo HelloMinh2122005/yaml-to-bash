@@ -179,7 +179,7 @@ Every Azure CLI call made by the engine or host scripts (`pre_run`, computed col
 
 ### Conformance Tracking & Azure DevOps Logging
 - At completion, the engine prints a plan conformance summary: `conformance: m/n VMs matched plan`. If any VM executes unexpected Azure CLI calls or fails to execute expected calls, deviations are logged to stderr and `result.log`.
-- Under Azure DevOps (`TF_BUILD=True` or `TF_BUILD=1`), console output organizes each VM's logs into collapsible groups (`##[group]<vm_name> · <outcome>` ... `##[endgroup]`). Any embedded `##vso[` markers in VM outputs are neutralised to prevent log injection, and plan mismatches emit `##vso[task.logissue type=warning]`.
+- Under Azure DevOps (`TF_BUILD=True` or `TF_BUILD=1`), console output organizes each VM's logs into collapsible groups (`##[group]<vm_name> | <outcome>` ... `##[endgroup]`). Any embedded `##vso[` markers in VM outputs are neutralised to prevent log injection, and plan mismatches emit `##vso[task.logissue type=warning]`.
 
 ### Exit Codes
 - `0`: All VMs completed successfully (`OK`), post hooks passed, power actions completed. In `--phase invoke`, indicates Phase 1 succeeded and emits `fired=<n>` on the last line.
@@ -207,11 +207,32 @@ Every Azure CLI call made by the engine or host scripts (`pre_run`, computed col
 | `ERROR:vm_not_found` | VM does not exist in resource group/subscription | Logged, no retry |
 | `ERROR:auth` | Authentication failure (`az login` required) | Circuit breaker aborts entire run after 5 consecutive auth errors |
 | `ERROR:result_truncated` | Output exceeded 4 KB buffer limit | Ensure step output goes to `$LOG_FILE`, keep `write_result` values concise |
+| `ERROR:no_result_block` | Output lacked result delimiters (`===BEGIN_RESULT_RES===` / `===END_RESULT_RES===`) | Logged, no retry |
 | `ERROR:no_result` | Worker did not produce a finished part file | Synthesized by merger to guarantee row count equals input |
 
 ---
 
-## 6. Testing
+## 6. ASCII-Only Reports & LF Policy
+
+To guarantee compatibility across automated CI/CD runners, diverse shells, and desktop applications (such as Excel misinterpreting UTF-8 CSVs as ANSI on Windows), the engine enforces strict ASCII-only reporting and LF-only line endings:
+
+- **LF-Only Repository Policy**: A root `.gitattributes` configuration (`* text=auto eol=lf`) enforces that all text files check out and remain LF-only regardless of host `core.autocrlf` settings.
+- **Static Validation Scan**: At the start of `validate`, `compile`, or `run` (across all phases), `job.yaml` (including raw text and comments), the input CSV file, and all resolved `script_path` files (prechecks, steps, collect columns, post_run hooks) are verified as valid UTF-8 and strictly ASCII. If any non-ASCII character (codepoint > 127) is found, the command exits 1 with error lines formatted as `path:line:col: non-ASCII character U+XXXX`, capped at 20 offending lines per file followed by a count `path: N more non-ASCII characters`. Undecodable bytes report `path: invalid UTF-8 at byte N`, and UTF-8 BOM is rejected as `path:1:1: non-ASCII character U+FEFF`.
+- **Runtime Folding**: Dynamic runtime values (such as remote `write_result` outputs, computed columns, precheck/post-run stdout/stderr, and Azure CLI errors) are sanitized before reaching any sink (`result.csv`, `result.log`, part files, or console). Vietnamese and accented Latin characters fold to their base ASCII equivalents (e.g. `Nguyễn` -> `Nguyen`, `Đà Nẵng` -> `Da Nang`), while all other non-ASCII characters (e.g. emoji, CJK) fold to `?`. Folding never raises exceptions. Raw unmutated output is preserved on the VM in `$LOG_FILE`.
+- **Sanitization Reporting**:
+  - Each VM log records `[ascii] <source>: N non-ASCII char(s) replaced` once per sanitized source (`<column_name>`, `precheck:<name>`, `post_run:<name>`, or `az`).
+  - When any values are sanitized, the run summary prints:
+    ```
+    ascii: N value(s) sanitized on M VM(s)
+    ```
+  - Under Azure DevOps (`TF_BUILD=True` or `TF_BUILD=1`), a pipeline warning issue is also emitted:
+    ```
+    ##vso[task.logissue type=warning]ascii: N value(s) sanitized on M VM(s)
+    ```
+
+---
+
+## 7. Testing
 
 The framework includes a comprehensive test suite (100+ tests) covering:
 - Shared engine components (scheduler, dispatcher, collector, merger, collect-list).

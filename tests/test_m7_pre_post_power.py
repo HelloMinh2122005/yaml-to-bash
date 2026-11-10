@@ -685,7 +685,7 @@ def test_banner_power_policy_warning(tmp_path, setup_fake_az_env, capsys):
     run_job(args)
     captured = capsys.readouterr().out
     assert (
-        "Power policy: pre_run uses action 'stop' — after the job, deallocates up to 1 VMs, "
+        "Power policy: pre_run uses action 'stop' - after the job, deallocates up to 1 VMs, "
         "INCLUDING VMs that are running now"
     ) in captured
 

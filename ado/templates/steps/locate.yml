@@ -1,0 +1,42 @@
+# locate.yml - Locate template scripts and payload path
+# Part of ADO-native patch template package (R1).
+# Pure ASCII, LF line endings, BOM-less UTF-8.
+
+parameters:
+  - name: templatesRepo
+    type: string
+    default: 'self'
+  - name: payloadPath
+    type: string
+
+steps:
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $templatesRepo = '${{ parameters.templatesRepo }}'
+      $payloadPath = '${{ parameters.payloadPath }}'
+      $sourcesDir = '$(Build.SourcesDirectory)'
+
+      if ($templatesRepo -eq 'self' -or [string]::IsNullOrEmpty($templatesRepo)) {
+          $scriptsDir = "$sourcesDir/ado/scripts"
+      } else {
+          $scriptsDir = "$sourcesDir/$templatesRepo/ado/scripts"
+      }
+
+      if ([string]::IsNullOrEmpty($payloadPath)) {
+          $payload = ''
+      } elseif ([System.IO.Path]::IsPathRooted($payloadPath)) {
+          $payload = $payloadPath
+      } else {
+          $payload = "$sourcesDir/$payloadPath"
+      }
+
+      $workDir = '$(Agent.TempDirectory)/y2/$(Build.BuildId)'
+      $reportDir = '$(Build.ArtifactStagingDirectory)/y2-report'
+      $runId = '$(Build.BuildId)-$(System.JobAttempt)'
+
+      Write-Host "##vso[task.setvariable variable=Y2_SCRIPTS_DIR]$scriptsDir"
+      Write-Host "##vso[task.setvariable variable=Y2_PAYLOAD]$payload"
+      Write-Host "##vso[task.setvariable variable=Y2_WORK_DIR]$workDir"
+      Write-Host "##vso[task.setvariable variable=Y2_REPORT_DIR]$reportDir"
+      Write-Host "##vso[task.setvariable variable=Y2_RUN_ID]$runId"
+    displayName: 'Locate scripts and configure runtime paths'

@@ -1,0 +1,61 @@
+# patch-invoke.yml - Example scheduled patch execution pipeline extending patch-invoke template
+# Part of ADO-native patch template package (R1).
+# Pure ASCII, LF line endings, BOM-less UTF-8.
+
+trigger: none
+
+schedules:
+  - cron: "0 2 * * 0"
+    displayName: "Weekly Sunday 02:00 UTC Patch Run"
+    branches:
+      include:
+        - main
+    always: true
+
+# ==============================================================================
+# Separate Templates Repository Setup:
+# When patch templates reside in a central or separate repository rather than
+# 'self', declare the repository resource and pass `templatesRepo`:
+#
+# resources:
+#   repositories:
+#     - repository: patch_templates
+#       type: git
+#       name: Infrastructure/ado-patch-templates
+#       ref: refs/heads/main
+#
+# extends:
+#   template: ado/templates/patch-invoke.yml@patch_templates
+#   parameters:
+#     templatesRepo: 'patch_templates'
+#     serviceConnection: 'sc-azure-lab'
+#     ...
+# ==============================================================================
+
+extends:
+  template: ../templates/patch-invoke.yml
+  parameters:
+    serviceConnection: 'sc-azure-lab'
+    targetsKql: 'Resources | where type =~ "microsoft.compute/virtualmachines" and tags["Environment"] == "Lab"'
+    osType: 'windows'
+    payloadPath: 'ado/examples/payloads/sample-windows.ps1'
+    maxJobs: 20
+    pollSeconds: 15
+    before_start: []
+    after_run:
+      - task: PowerShell@2
+        displayName: 'Post-run notification'
+        inputs:
+          targetType: 'inline'
+          script: |
+            Write-Host "Post-run notification: Run command payload completed for Run ID $(Y2_RUN_ID)."
+    after_restore:
+      # Note: Templates add no condition to hook steps.
+      # Hooks intending to run after errors or cancellation must specify their own condition.
+      - task: PowerShell@2
+        displayName: 'Post-restore notification'
+        condition: succeededOrFailed()
+        inputs:
+          targetType: 'inline'
+          script: |
+            Write-Host "Post-restore hook executed with status succeededOrFailed."

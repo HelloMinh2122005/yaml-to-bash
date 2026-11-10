@@ -37,6 +37,7 @@ def evaluate(
     recorder: TraceRecorder,
     phases_run: Sequence[str],
     expected: Optional[Dict[int, Set[str]]] = None,
+    already_invoked: Optional[Set[int]] = None,
 ) -> ConformanceReport:
     """
     Evaluate recorded az execution against plan for all VMs this process worked on.
@@ -75,9 +76,13 @@ def evaluate(
         budget = vm_plan.get("budget", [])
 
         # Filter budget stages by phases_run
+        active_phases_for_row = set(active_phases)
+        if already_invoked and row.index in already_invoked:
+            active_phases_for_row.discard("invoke")
+
         stage_allow: List[Dict[str, Any]] = []
         for s in budget:
-            if s["stage"] in active_phases:
+            if s["stage"] in active_phases_for_row:
                 stage_allow.append({
                     "stage": s["stage"],
                     "allow": dict(s.get("allow", {})),
@@ -141,6 +146,8 @@ def evaluate(
         if problem is None:
             expected_kinds = set(expected.get(row.index, set())) if expected is not None else set()
             expected_kinds.update(recorder.expected(row.index))
+            if already_invoked and row.index in already_invoked:
+                expected_kinds.discard(KIND_INVOKE)
 
             for exp_kind in expected_kinds:
                 if not any(e.kind == exp_kind for e in collapsed):

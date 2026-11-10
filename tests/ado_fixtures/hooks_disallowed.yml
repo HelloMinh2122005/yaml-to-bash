@@ -1,0 +1,73 @@
+# tests/ado_fixtures/hooks_disallowed.yml
+# Disallowed steps fixture for ADO hook allowlist validation (AC-7, TP-07).
+# Lists disallowed steps (bash:, script:, pwsh:, unauthorized tasks,
+# AzurePowerShell@5 with wrong or missing azureSubscription) to test rejection branches.
+# Pure ASCII, LF line endings, BOM-less UTF-8.
+
+- bash: echo "disallowed inline bash step"
+  displayName: "Disallowed Bash Step"
+
+- script: echo "disallowed inline script step"
+  displayName: "Disallowed Script Step"
+
+- pwsh: Write-Host "disallowed inline pwsh step"
+  displayName: "Disallowed Pwsh Step"
+
+- task: Bash@3
+  displayName: "Disallowed Bash Task"
+  inputs:
+    targetType: "inline"
+    script: 'echo "bash task"'
+
+- task: CmdLine@2
+  displayName: "Disallowed CmdLine Task"
+  inputs:
+    script: 'echo "cmdline task"'
+
+- task: AzureCLI@2
+  displayName: "Disallowed Azure CLI Task"
+  inputs:
+    azureSubscription: "my-arm-connection"
+    scriptType: "bash"
+    scriptLocation: "inlineScript"
+    inlineScript: "az account show"
+
+- task: PowerShell@1
+  displayName: "Disallowed PowerShell v1 Task"
+  inputs:
+    scriptType: "inline"
+    inline: 'Write-Host "powershell v1"'
+
+- task: PublishPipelineArtifact@2
+  displayName: "Disallowed PublishPipelineArtifact v2 Task"
+  inputs:
+    targetPath: "$(Pipeline.Workspace)"
+    artifact: "drop"
+
+- task: DownloadPipelineArtifact@1
+  displayName: "Disallowed DownloadPipelineArtifact v1 Task"
+  inputs:
+    artifact: "drop"
+
+- task: AzurePowerShell@4
+  displayName: "Disallowed AzurePowerShell v4 Task"
+  inputs:
+    azureSubscription: "my-arm-connection"
+
+- task: AzurePowerShell@5
+  displayName: "Disallowed AzurePowerShell with wrong subscription"
+  inputs:
+    azureSubscription: "unauthorized-subscription"
+    ScriptType: "InlineScript"
+    Inline: 'Write-Host "azure powershell wrong sub"'
+
+- task: AzurePowerShell@5
+  displayName: "Disallowed AzurePowerShell missing subscription"
+  inputs:
+    ScriptType: "InlineScript"
+    Inline: 'Write-Host "azure powershell missing sub"'
+
+- task: CustomUnapprovedTask@1
+  displayName: "Disallowed Custom Task"
+  inputs:
+    command: "run"

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import posixpath
+from pathlib import Path, PurePosixPath
 import re
-from pathlib import Path
 from typing import Any
 
+from y2shared.asciiguard import scan_non_ascii
 from y2shared.profile import Reporter, Profile
 from y2shared.validate import (
     ValidationIssue,
@@ -20,11 +20,11 @@ from y2shared.config import Job
 def validate_runcommand_bash(rc: dict[str, Any], yaml_dir: Path, reporter: Reporter) -> None:
     """Validate bash-specific runcommand configuration (POSIX absolute paths)."""
     res_file = rc.get("res_file")
-    if not res_file or not isinstance(res_file, str) or not posixpath.isabs(res_file) or re.match(r"^[a-zA-Z]:", res_file):
+    if not res_file or not isinstance(res_file, str) or not PurePosixPath(res_file).is_absolute() or re.match(r"^[a-zA-Z]:", res_file):
         reporter.err("invoke.runcommand.res_file", f"res_file must be an absolute path, got '{res_file}'")
 
     log_file = rc.get("log_file")
-    if not log_file or not isinstance(log_file, str) or not posixpath.isabs(log_file) or re.match(r"^[a-zA-Z]:", log_file):
+    if not log_file or not isinstance(log_file, str) or not PurePosixPath(log_file).is_absolute() or re.match(r"^[a-zA-Z]:", log_file):
         reporter.err("invoke.runcommand.log_file", f"log_file must be an absolute path, got '{log_file}'")
 
 

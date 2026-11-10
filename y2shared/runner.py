@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from y2shared import asciiguard
+from y2shared.asciiguard import fold_ascii
 from y2shared.collectlist import CollectList
 from y2shared.collector import collect_for_vm
 from y2shared.config import Job, load_job
@@ -113,8 +115,8 @@ class RunState:
 
             return (
                 f"[{phase_name}] [ {self.completed}/{self.total_vms} ] "
-                f"ok {self.ok} · skipped {self.skipped} · ended {self.ended} · error {self.error} · "
-                f"running {active_workers} · eta {eta_str}"
+                f"ok {self.ok} | skipped {self.skipped} | ended {self.ended} | error {self.error} | "
+                f"running {active_workers} | eta {eta_str}"
             )
 
 
@@ -142,6 +144,7 @@ def run_collect_phase(
     if not work_set:
         return
 
+    collect_cols = [c.column for c in job.collect]
     actual_read_fn = read_fn or read_results
     seq_gen = itertools.count()
     heap: list[tuple[float, int, VMRow, dict[str, Any], int]] = []
@@ -232,7 +235,7 @@ def run_collect_phase(
                         marker = f"ERROR:internal:{err_type}"
                         logger.finalize(marker)
                         row_vals = collect_for_vm(job, r, outcome_marker=marker, logger=logger, var_to_step=var_to_step)
-                        write_part_files(parts_dir, r, total_rows, row_vals, logger)
+                        write_part_files(parts_dir, r, total_rows, row_vals, logger, columns=collect_cols)
                         run_state.update("ERROR")
                         continue
 
@@ -264,7 +267,7 @@ def run_collect_phase(
 
                             logger.finalize(marker)
                             row_vals = collect_for_vm(job, r, outcome_marker=marker, logger=logger, var_to_step=var_to_step)
-                            write_part_files(parts_dir, r, total_rows, row_vals, logger)
+                            write_part_files(parts_dir, r, total_rows, row_vals, logger, columns=collect_cols)
                             run_state.update("ERROR")
                     else:
                         # Completed OK or with error marker
@@ -275,11 +278,16 @@ def run_collect_phase(
                             run_state.update("OK")
                         else:
                             marker = res.error or "ERROR:unknown"
+                            if marker.startswith("ERROR:az:"):
+                                folded_marker, n = fold_ascii(marker)
+                                if n > 0:
+                                    asciiguard.record(r.vm_name, "az", n)
+                                marker = folded_marker
                             row_vals = collect_for_vm(job, r, outcome_marker=marker, logger=logger, var_to_step=var_to_step)
                             logger.finalize(marker)
                             run_state.update("ERROR")
 
-                        write_part_files(parts_dir, r, total_rows, row_vals, logger)
+                        write_part_files(parts_dir, r, total_rows, row_vals, logger, columns=collect_cols)
 
                     sys.stderr.write("\r" + run_state.format_progress("Phase 2: Collect", len(in_flight)) + "   ")
                     sys.stderr.flush()
@@ -300,16 +308,26 @@ def power_policy_banner(job: Job, total_vms: int) -> str | None:
     actions = job.result_actions
     if "stop" in actions:
         return (
-            f"pre_run uses action 'stop' — after the job, deallocates up to {total_vms} VMs, "
+            f"pre_run uses action 'stop' - after the job, deallocates up to {total_vms} VMs, "
             f"INCLUDING VMs that are running now"
         )
     if "start-stop" in actions:
-        return "pre_run uses action 'start-stop' — VMs this run starts are returned to their previous power state"
+        return "pre_run uses action 'start-stop' - VMs this run starts are returned to their previous power state"
     return None
+
+
+def _emit_ascii_summary() -> None:
+    """Print ASCII summary line and emit ADO warning under TF_BUILD if non-ASCII sanitized."""
+    total_sanitized, total_vms = asciiguard.run_totals()
+    if total_sanitized > 0:
+        msg = f"ascii: {total_sanitized} value(s) sanitized on {total_vms} VM(s)"
+        print(msg)
+        emit_warning(msg)
 
 
 def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
     """Main execution function invoked by `<tool> run`."""
+    asciiguard.reset()
     phase_mode = getattr(args, "phase", "all")
     dry_run = getattr(args, "dry_run", False)
     if phase_mode != "all" and dry_run:
@@ -331,6 +349,8 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
         for e in val_res.errors:
             print(f"ERROR: {e}", file=sys.stderr)
         return 1
+
+    collect_cols = [c.column for c in job.collect]
 
     for w in val_res.warnings:
         print(f"WARNING: {w}", file=sys.stderr)
@@ -492,12 +512,30 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
     if sink is not None:
         set_line_sink(sink.add)
 
+    outcome_cache: dict[int, str] = {}
+
     def resolve_outcome(row: VMRow) -> str:
+        if row.index in outcome_cache:
+            return outcome_cache[row.index]
         csv_path, _ = get_part_paths(parts_dir, row, len(target_rows))
         if csv_path.is_file() and csv_path.stat().st_size > 0:
             row_vals = read_part_row(csv_path)
             if row_vals:
-                return get_vm_outcome(row_vals)
+                outcome = get_vm_outcome(row_vals)
+                outcome_cache[row.index] = outcome
+                return outcome
+        if job.output_csv and Path(job.output_csv).is_file():
+            try:
+                import csv as _csv
+                with open(job.output_csv, "r", encoding="utf-8") as _f:
+                    _rdr = _csv.reader(_f)
+                    _all_rows = list(_rdr)
+                    if 0 < row.index < len(_all_rows):
+                        outcome = get_vm_outcome(_all_rows[row.index])
+                        outcome_cache[row.index] = outcome
+                        return outcome
+            except Exception:
+                pass
         if phase_mode == "invoke" and collect_list.has(row.index):
             return "invoked"
         return "no_result"
@@ -508,7 +546,14 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
 
     def _eval_conformance(phases_to_eval: list[str], rows_worked: list[VMRow]) -> ConformanceReport:
         nonlocal conformance_report
-        report = evaluate_conformance(plan_ctx, rows_worked, RECORDER, phases_run=phases_to_eval)
+        already_invoked_set = set(existing_records.keys()) if resume else None
+        report = evaluate_conformance(
+            plan_ctx,
+            rows_worked,
+            RECORDER,
+            phases_run=phases_to_eval,
+            already_invoked=already_invoked_set,
+        )
         conformance_report = report
 
         if report.mismatches:
@@ -601,7 +646,7 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
                     if not proceed:
                         row_vals = collect_for_vm(job, row, outcome_marker=precheck_marker, logger=logger, var_to_step=var_to_step)
                         logger.finalize(precheck_marker or "SKIPPED")
-                        write_part_files(parts_dir, row, len(target_rows), row_vals, logger)
+                        write_part_files(parts_dir, row, len(target_rows), row_vals, logger, columns=collect_cols)
                         outcome_type = "SKIPPED" if "SKIPPED:" in (precheck_marker or "") else "ENDED"
                         run_state.update(outcome_type)
                         return
@@ -611,7 +656,7 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
                         logger.log("[dry-run] Prechecks passed; skipping run-command execution.")
                         row_vals = collect_for_vm(job, row, outcome_marker="DRY_RUN:ok", logger=logger, var_to_step=var_to_step)
                         logger.finalize("DRY_RUN:ok")
-                        write_part_files(parts_dir, row, len(target_rows), row_vals, logger)
+                        write_part_files(parts_dir, row, len(target_rows), row_vals, logger, columns=collect_cols)
                         run_state.update("OK")
                         return
 
@@ -653,9 +698,14 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
 
                         # Write part file now with error marker
                         marker = invoke_res.error or "ERROR:unknown"
+                        if marker.startswith("ERROR:az:"):
+                            folded_marker, n = fold_ascii(marker)
+                            if n > 0:
+                                asciiguard.record(row.vm_name, "az", n)
+                            marker = folded_marker
                         row_vals = collect_for_vm(job, row, outcome_marker=marker, logger=logger, var_to_step=var_to_step)
                         logger.finalize(marker)
-                        write_part_files(parts_dir, row, len(target_rows), row_vals, logger)
+                        write_part_files(parts_dir, row, len(target_rows), row_vals, logger, columns=collect_cols)
                         run_state.update("ERROR")
 
                 except AuthAbortedError as e:
@@ -667,6 +717,7 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
                         total_rows=len(target_rows),
                         row_values=collect_for_vm(job, row, outcome_marker="ERROR:auth", logger=logger, var_to_step=var_to_step),
                         logger=logger,
+                        columns=collect_cols,
                     )
                     run_state.update("ERROR")
                     run_state.stop_requested = True
@@ -684,6 +735,7 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
                         total_rows=len(target_rows),
                         row_values=collect_for_vm(job, row, outcome_marker=marker, logger=logger, var_to_step=var_to_step),
                         logger=logger,
+                        columns=collect_cols,
                     )
                     run_state.update("ERROR")
 
@@ -707,6 +759,7 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
             report = _eval_conformance(["invoke"], phase1_rows)
             _print_groups(phase1_rows)
             print(format_conformance_summary(report))
+            _emit_ascii_summary()
             if phase_mode == "invoke":
                 collect_list.ensure_exists()
                 records = collect_list.load(target_rows)
@@ -721,6 +774,7 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
             report = _eval_conformance(["invoke"], phase1_rows)
             _print_groups(phase1_rows)
             print(format_conformance_summary(report))
+            _emit_ascii_summary()
             if phase_mode == "invoke":
                 collect_list.ensure_exists()
                 records = collect_list.load(target_rows)
@@ -739,6 +793,7 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
             cur_phase = get_run_info(parts_dir).get("phase", "invoke")
             if cur_phase not in ("post", "merged"):
                 update_run_phase(parts_dir, "collect")
+            _emit_ascii_summary()
             records = collect_list.load(target_rows)
             fired = sum(1 for rec in records.values() if rec.get("confirmed"))
             print(f"fired={fired}")
@@ -860,6 +915,9 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
         phases_to_eval = ["collect", "post"]
     conformance_report = _eval_conformance(phases_to_eval, rows_worked)
 
+    for r in target_rows:
+        resolve_outcome(r)
+
     print("Merging VM part files...")
     try:
         counts = merge_parts(
@@ -873,6 +931,7 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
             _print_groups(rows_worked)
             print(format_conformance_summary(conformance_report))
         print(f"\nFATAL: {me}", file=sys.stderr)
+        _emit_ascii_summary()
         return 3
 
     if parts_dir.exists():
@@ -886,14 +945,14 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
     print(f"  Ended:       {counts.get('ENDED', 0)}")
     print(f"  Error:       {counts.get('ERROR', 0)}")
     if post_result and (post_result.hooks_ok > 0 or post_result.hooks_failed > 0 or job.post_run):
-        print(f"  Post hooks:  ok {post_result.hooks_ok} · failed {post_result.hooks_failed}")
+        print(f"  Post hooks:  ok {post_result.hooks_ok} | failed {post_result.hooks_failed}")
     if post_result and (post_result.deallocated > 0 or post_result.powered_off > 0 or job.result_actions & POWER_AFTER_ACTIONS):
         print(f"  Deallocated: {post_result.deallocated}")
         print(f"  Powered off: {post_result.powered_off}")
 
     still_running_vms = [r for r in target_rows if is_part_still_running(parts_dir, r, len(target_rows))]
     if still_running_vms:
-        names = ", ".join(r.vm_name for r in still_running_vms)
+        names = ", ".join(fold_ascii(r.vm_name)[0] for r in still_running_vms)
         print(f"  Left running: {len(still_running_vms)} ({names}, rerun with {profile.tool} run {job.yaml_path} --resume)")
 
     print(f"  Output CSV:  {job.output_csv}")
@@ -905,6 +964,7 @@ def run_job(args: argparse.Namespace, profile: Profile | None = None) -> int:
         print(f"    Rerun later to read remaining VMs: {profile.tool} run {job.yaml_path} --resume")
 
     print("==================================================")
+    _emit_ascii_summary()
     if conformance_report is not None:
         _print_groups(rows_worked)
         print(format_conformance_summary(conformance_report))

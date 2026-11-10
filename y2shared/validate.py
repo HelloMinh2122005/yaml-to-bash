@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from y2shared.asciiguard import scan_non_ascii
 from y2shared.config import Job, load_yaml_raw, parse_job_from_dict, parse_duration
 from y2shared.profile import Profile, Reporter
 from y2shared.scan import scan_written_vars
@@ -69,11 +70,20 @@ def validate_job_dict(
             return cand
         return (yaml_dir / cand).resolve()
 
+    def _scan_file_ascii(fpath: Path | None) -> None:
+        if fpath and fpath.is_file():
+            for issue_str in scan_non_ascii(fpath):
+                errors.append(ValidationIssue(path="", message=issue_str))
+
     # Root requirements
     for req_field in ["input", "output_csv", "output_log"]:
         val = raw.get(req_field)
         if not val or not isinstance(val, str) or not val.strip():
             err(req_field, f"Missing required field '{req_field}'")
+
+    input_val = raw.get("input")
+    if input_val and isinstance(input_val, str) and input_val.strip():
+        _scan_file_ascii(resolve_path(input_val))
 
     # actions (removed: the power policy is set per pre_run result)
     if "actions" in raw:
@@ -199,8 +209,10 @@ def validate_job_dict(
                     resolved = resolve_path(sp)
                     if not resolved or not resolved.is_file():
                         err(f"{p_path}.script_path", f"Script file not found or not readable: '{sp}'")
-                    elif not os.access(resolved, os.X_OK):
-                        warn(f"{p_path}.script_path", f"Script file '{sp}' is not executable (harmless since embedded)")
+                    else:
+                        if not os.access(resolved, os.X_OK):
+                            warn(f"{p_path}.script_path", f"Script file '{sp}' is not executable (harmless since embedded)")
+                        _scan_file_ascii(resolved)
 
                 if "timeout" in p:
                     t = p["timeout"]
@@ -282,6 +294,7 @@ def validate_job_dict(
                     else:
                         if not os.access(resolved, os.X_OK):
                             warn(f"{s_path}.script_path", f"Script file '{sp}' is not executable (harmless since embedded)")
+                        _scan_file_ascii(resolved)
                         try:
                             with open(resolved, "r", encoding="utf-8") as sf:
                                 step_body = sf.read()
@@ -367,8 +380,10 @@ def validate_job_dict(
                 resolved = resolve_path(sp)
                 if not resolved or not resolved.is_file():
                     err(f"{c_path}.script_path", f"Script file not found or not readable: '{sp}'")
-                elif not os.access(resolved, os.X_OK):
-                    warn(f"{c_path}.script_path", f"Script file '{sp}' is not executable (harmless since embedded)")
+                else:
+                    if not os.access(resolved, os.X_OK):
+                        warn(f"{c_path}.script_path", f"Script file '{sp}' is not executable (harmless since embedded)")
+                    _scan_file_ascii(resolved)
 
             if "timeout" in c:
                 t = c["timeout"]
@@ -406,6 +421,8 @@ def validate_job_dict(
                     resolved = resolve_path(sp)
                     if not resolved or not resolved.is_file():
                         err(f"{p_path}.script_path", f"Script file not found or not readable: '{sp}'")
+                    else:
+                        _scan_file_ascii(resolved)
 
                 if "timeout" in p:
                     t = p["timeout"]
@@ -445,15 +462,21 @@ def validate_job_file(
             warnings=[],
         )
 
+    scan_errors: list[ValidationIssue] = [ValidationIssue(path="", message=e) for e in scan_non_ascii(path)]
+
     try:
         raw, file_hash = load_yaml_raw(path)
     except Exception as e:
+        if scan_errors:
+            return None, ValidationResult(errors=scan_errors, warnings=[])
         return None, ValidationResult(
             errors=[ValidationIssue(path="", message=f"Failed to read/parse YAML: {e}")],
             warnings=[],
         )
 
     res = validate_job_dict(raw, path, profile=profile)
+    if scan_errors:
+        res.errors = scan_errors + res.errors
     if not res.is_valid:
         return None, res
 

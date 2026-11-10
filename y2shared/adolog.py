@@ -22,7 +22,9 @@ def neutralise(line: str) -> str:
 def emit_warning(msg: str) -> None:
     """Print single-line ADO warning issue if running under TF_BUILD."""
     if is_tf_build():
-        print(f"##vso[task.logissue type=warning]{msg}")
+        from y2shared.asciiguard import fold_ascii
+        folded_msg, _ = fold_ascii(msg)
+        print(f"##vso[task.logissue type=warning]{folded_msg}")
 
 
 class ProcessLogSink:
@@ -48,15 +50,20 @@ def print_vm_groups(
 ) -> None:
     """
     Print one ADO group per VM this process worked on, in index order:
-    ##[group]<vm_name> · <outcome>
+    ##[group]<vm_name> | <outcome>
     <neutralised lines>
     ##[endgroup]
     """
+    from y2shared.asciiguard import fold_ascii
+
     for row in sorted(rows, key=lambda r: r.index):
         outcome = outcome_fn(row)
         lines = sink.drain(row.index)
-        print(f"##[group]{row.vm_name} · {outcome}")
+        folded_vm, _ = fold_ascii(row.vm_name)
+        folded_outcome, _ = fold_ascii(outcome)
+        print(f"##[group]{folded_vm} | {folded_outcome}")
         for ln in lines:
-            print(neutralise(ln))
+            folded_ln, _ = fold_ascii(ln)
+            print(neutralise(folded_ln))
         print("##[endgroup]")
 

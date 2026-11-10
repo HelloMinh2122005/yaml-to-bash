@@ -1,0 +1,73 @@
+# ==============================================================================
+# Azure DevOps Pipeline: Smoke Test on Self-Hosted win01 Agent
+# Covers: AC-1, AC-2, AC-5 (20261108-lab-ado-agent)
+# ==============================================================================
+name: smoke-$(Date:yyyyMMdd)$(Rev:.r)
+trigger: none
+pr: none
+
+parameters:
+  - name: serviceConnection
+    displayName: Azure ARM Service Connection
+    type: string
+    default: sc-azure-lab
+  - name: resourceGroup
+    displayName: Lab Resource Group
+    type: string
+    default: rg-lab-10vms
+
+pool:
+  name: Production Windows Agent
+
+jobs:
+  - job: SmokeTest
+    displayName: Smoke Test on Production Windows Agent (win01)
+    timeoutInMinutes: 15
+    steps:
+      - checkout: none
+
+      - task: AzurePowerShell@5
+        displayName: 'Verify PS 5.1, Az Modules, and Lab VMs'
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          azurePowerShellVersion: LatestVersion
+          pwsh: false
+          ScriptType: InlineScript
+          Inline: |
+            $ErrorActionPreference = 'Stop'
+
+            Write-Host "=================== PowerShell Version ==================="
+            Write-Host "PSVersion: $($PSVersionTable.PSVersion)"
+            Write-Host "PSEdition: $($PSVersionTable.PSEdition)"
+            if ($PSVersionTable.PSVersion.Major -ne 5) {
+                Write-Error "Expected Windows PowerShell 5.1, but got $($PSVersionTable.PSVersion)"
+                exit 1
+            }
+
+            Write-Host "`n=================== Az Module Versions ==================="
+            $modules = @('Az.Accounts', 'Az.Compute', 'Az.ResourceGraph')
+            foreach ($mod in $modules) {
+                $installed = Get-Module -ListAvailable -Name $mod | Sort-Object Version -Descending | Select-Object -First 1
+                if ($installed) {
+                    Write-Host "$mod Version: $($installed.Version)"
+                } else {
+                    Write-Error "Required module $mod is NOT installed!"
+                    exit 1
+                }
+            }
+
+            Write-Host "`n=================== Lab VM Listing ==================="
+            $rgName = '${{ parameters.resourceGroup }}'
+            Write-Host "Querying VMs in resource group: $rgName..."
+            $vms = Get-AzVM -ResourceGroupName $rgName -Status
+            $vms | Format-Table -Property Name, ResourceGroupName, Location, ProvisioningState, PowerState -AutoSize
+
+            Write-Host "VMs detected: $($vms.Count)"
+            foreach ($vm in $vms) {
+                Write-Host "VM: $($vm.Name) -> $($vm.PowerState)"
+            }
+
+            if ($vms.Count -eq 0) {
+                Write-Error "No VMs found in resource group $rgName"
+                exit 1
+            }

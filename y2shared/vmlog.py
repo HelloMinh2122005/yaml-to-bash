@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import datetime
+import re
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
+from y2shared.asciiguard import fold_ascii, record, vm_report
 from y2shared.aztrace import format_engine_line, format_script_line
 
 _LINE_SINK: Optional[Callable[[int, str, str], None]] = None
@@ -19,9 +21,21 @@ def set_line_sink(fn: Optional[Callable[[int, str, str], None]]) -> None:
 
 def tee_lines(index: int, vm_name: str, lines: list[str]) -> None:
     """Send lines to the line sink if one is installed."""
-    if _LINE_SINK is not None:
-        for ln in lines:
-            _LINE_SINK(index, vm_name, ln)
+    cur_hook = "unknown"
+    for ln in lines:
+        m = re.search(r"\[post_run:([^\]]+)\]", ln)
+        if m:
+            cur_hook = m.group(1)
+        folded_ln, n = fold_ascii(ln)
+        if n > 0:
+            if m:
+                record(vm_name, f"post_run:{m.group(1)}", n)
+            elif "[az]" in ln or "az " in ln.lower():
+                record(vm_name, "az", n)
+            else:
+                record(vm_name, f"post_run:{cur_hook}", n)
+        if _LINE_SINK is not None:
+            _LINE_SINK(index, vm_name, folded_ln)
 
 
 class VMLogger:
@@ -48,13 +62,14 @@ class VMLogger:
         return datetime.datetime.now().astimezone().isoformat()
 
     def _append(self, line: str) -> None:
-        self.lines.append(line)
+        folded, _ = fold_ascii(line)
+        self.lines.append(folded)
         if self._sink and _LINE_SINK is not None:
-            _LINE_SINK(self.index, self.vm_name, line)
+            _LINE_SINK(self.index, self.vm_name, folded)
 
     def _add_header(self) -> None:
         self._append(f"==================================================")
-        self._append(f"VM: {self.vm_name} (Row index {self.index}) — Started {self._now_str()}")
+        self._append(f"VM: {self.vm_name} (Row index {self.index}) - Started {self._now_str()}")
         self._append(f"==================================================")
 
     def log(self, message: str) -> None:
@@ -63,16 +78,27 @@ class VMLogger:
 
     def log_precheck(self, name: str, stdout: str, action: str, note: str) -> None:
         """Log precheck result line matching specification format."""
-        self._append(f"[{self._now_str()}] [precheck {name}] → \"{stdout}\" → {action}: {note}")
+        folded_stdout, n = fold_ascii(stdout)
+        if n > 0:
+            record(self.vm_name, f"precheck:{name}", n)
+        folded_action, _ = fold_ascii(action)
+        folded_note, _ = fold_ascii(note)
+        self._append(f"[{self._now_str()}] [precheck {name}] -> \"{folded_stdout}\" -> {folded_action}: {folded_note}")
 
     def log_dispatch(self, message: str) -> None:
         self._append(f"[{self._now_str()}] [dispatch] {message}")
 
     def log_collect(self, col: str, val: str) -> None:
-        self._append(f"[{self._now_str()}] [collect] {col} = {val}")
+        folded_val, n = fold_ascii(val)
+        if n > 0:
+            record(self.vm_name, col, n)
+        self._append(f"[{self._now_str()}] [collect] {col} = {folded_val}")
 
     def log_error(self, message: str) -> None:
-        self._append(f"[{self._now_str()}] [ERROR] {message}")
+        folded_msg, n = fold_ascii(message)
+        if n > 0 and ("az" in message.lower() or "[az]" in message):
+            record(self.vm_name, "az", n)
+        self._append(f"[{self._now_str()}] [ERROR] {folded_msg}")
 
     def log_az_engine(
         self,
@@ -84,7 +110,10 @@ class VMLogger:
         argv: Sequence[str],
     ) -> None:
         line = format_engine_line(kind, attempt, rc, status, dur, argv)
-        self._append(f"[{self._now_str()}] [az] {line}")
+        folded_line, n = fold_ascii(line)
+        if n > 0:
+            record(self.vm_name, "az", n)
+        self._append(f"[{self._now_str()}] [az] {folded_line}")
 
     def log_az_script(
         self,
@@ -94,13 +123,25 @@ class VMLogger:
         argv: Sequence[str],
     ) -> None:
         line = format_script_line(section, name, rc, argv)
-        self._append(f"[{self._now_str()}] [az] {line}")
+        folded_line, n = fold_ascii(line)
+        if n > 0:
+            record(self.vm_name, "az", n)
+        self._append(f"[{self._now_str()}] [az] {folded_line}")
 
     def log_az_note(self, note: str) -> None:
-        self._append(f"[{self._now_str()}] [az] {note}")
+        folded_note, n = fold_ascii(note)
+        if n > 0:
+            record(self.vm_name, "az", n)
+        self._append(f"[{self._now_str()}] [az] {folded_note}")
 
     def finalize(self, outcome: str) -> None:
-        self._append(f"[{self._now_str()}] Final outcome: {outcome}")
+        folded_outcome, n = fold_ascii(outcome)
+        if n > 0 and outcome.startswith("ERROR:az:"):
+            record(self.vm_name, "az", n)
+        for rpt_line in vm_report(self.vm_name):
+            if rpt_line not in self.lines:
+                self._append(rpt_line)
+        self._append(f"[{self._now_str()}] Final outcome: {folded_outcome}")
         self._append(f"==================================================\n")
 
     def get_text(self) -> str:

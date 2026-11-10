@@ -1,0 +1,33 @@
+# hooks.yml - Step template with compile-time allowlist validation
+# Part of ADO-native patch template package (R1).
+# Pure ASCII, LF line endings, BOM-less UTF-8.
+#
+# Allowlist (AC-7, ADR-001, 21-plan.md 1.4):
+#   - checkout
+#   - download
+#   - publish
+#   - powershell
+#   - PowerShell@2
+#   - PublishPipelineArtifact@1
+#   - DownloadPipelineArtifact@2
+#   - AzurePowerShell@5 (requires inputs.azureSubscription == parameters.serviceConnection)
+#
+# Allowed steps are re-emitted verbatim (- ${{ step }}) with no wrapping or added condition.
+# Disallowed steps (or mismatched AzurePowerShell@5 subscription) emit an invalid task
+# name ERROR_DISALLOWED_STEP_${{ parameters.hookName }} to halt ADO compilation at parse time.
+
+parameters:
+  - name: hook
+    type: stepList
+    default: []
+  - name: serviceConnection
+    type: string
+  - name: hookName
+    type: string
+
+steps:
+  - ${{ each step in parameters.hook }}:
+      - ${{ if or(ne(step.checkout, ''), ne(step.download, ''), ne(step.publish, ''), ne(step.powershell, ''), in(step.task, 'PowerShell@2', 'PublishPipelineArtifact@1', 'DownloadPipelineArtifact@2'), and(eq(step.task, 'AzurePowerShell@5'), eq(step.inputs.azureSubscription, parameters.serviceConnection))) }}:
+          - ${{ step }}
+      - ${{ else }}:
+          - ERROR_DISALLOWED_STEP_${{ parameters.hookName }}: "Hook '${{ parameters.hookName }}' contains disallowed step '${{ coalesce(step.task, step.displayName, 'unauthorized_step') }}'. Allowed steps: checkout, download, publish, powershell, PowerShell@2, PublishPipelineArtifact@1, DownloadPipelineArtifact@2, AzurePowerShell@5 (with matching serviceConnection)."

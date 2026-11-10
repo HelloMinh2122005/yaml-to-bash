@@ -1,0 +1,123 @@
+# patch-collect.yml - Entry template for manual patch collection / audit (collect)
+# Part of ADO-native patch template package (R1).
+# Pure ASCII, LF line endings, BOM-less UTF-8.
+#
+# Consuming pipeline extends this template:
+#   trigger: none
+#   extends:
+#     template: ado/templates/patch-collect.yml
+#     parameters:
+#       serviceConnection: 'my-arm-connection'
+#       targetsKql: 'Resources | where type =~ "microsoft.compute/virtualmachines"'
+#       osType: 'windows'
+#       payloadPath: 'scripts/collect.ps1'
+
+parameters:
+  - name: serviceConnection
+    type: string
+  - name: targetsKql
+    type: string
+  - name: osType
+    type: string
+    values:
+      - windows
+      - linux
+  - name: payloadPath
+    type: string
+  - name: maxJobs
+    type: number
+    default: 20
+  - name: pollSeconds
+    type: number
+    default: 15
+  - name: templatesRepo
+    type: string
+    default: 'self'
+  - name: before_start
+    type: stepList
+    default: []
+  - name: after_run
+    type: stepList
+    default: []
+  - name: after_restore
+    type: stepList
+    default: []
+
+jobs:
+  - job: PatchCollect
+    displayName: 'Patch Collect'
+    pool:
+      name: 'Production Windows Agent'
+    timeoutInMinutes: 360
+    cancelTimeoutInMinutes: 10
+    steps:
+      - checkout: self
+      - ${{ if ne(parameters.templatesRepo, 'self') }}:
+          - checkout: ${{ parameters.templatesRepo }}
+
+      # 1. Locate scripts and configure runtime paths
+      - template: steps/locate.yml
+        parameters:
+          templatesRepo: ${{ parameters.templatesRepo }}
+          payloadPath: ${{ parameters.payloadPath }}
+
+      # 2. Resolve target VMs via Resource Graph
+      - template: steps/resolve.yml
+        parameters:
+          serviceConnection: ${{ parameters.serviceConnection }}
+          targetsKql: ${{ parameters.targetsKql }}
+          osType: ${{ parameters.osType }}
+
+      # 3. User hook: before_start
+      - template: steps/hooks.yml
+        parameters:
+          hook: ${{ parameters.before_start }}
+          serviceConnection: ${{ parameters.serviceConnection }}
+          hookName: 'before_start'
+
+      # 4. Power start candidate VMs
+      - template: steps/power-start.yml
+        parameters:
+          serviceConnection: ${{ parameters.serviceConnection }}
+          pollSeconds: ${{ parameters.pollSeconds }}
+
+      # 5. Execute payload script on target VMs
+      - template: steps/run-command.yml
+        parameters:
+          serviceConnection: ${{ parameters.serviceConnection }}
+          osType: ${{ parameters.osType }}
+          maxJobs: ${{ parameters.maxJobs }}
+          pollSeconds: ${{ parameters.pollSeconds }}
+
+      # 6. User hook: after_run
+      - template: steps/hooks.yml
+        parameters:
+          hook: ${{ parameters.after_run }}
+          serviceConnection: ${{ parameters.serviceConnection }}
+          hookName: 'after_run'
+
+      # 7. Safe restore to pre-run power state (always runs)
+      - template: steps/power-restore.yml
+        parameters:
+          serviceConnection: ${{ parameters.serviceConnection }}
+          pollSeconds: ${{ parameters.pollSeconds }}
+
+      # 8. Finalize status and ADO job result (always runs)
+      - template: steps/finalize.yml
+        parameters:
+          serviceConnection: ${{ parameters.serviceConnection }}
+
+      # 9. Publish report artifacts (always runs)
+      - task: PublishPipelineArtifact@1
+        displayName: 'Publish patch report artifact'
+        condition: always()
+        inputs:
+          targetPath: '$(Y2_REPORT_DIR)'
+          artifact: 'y2-report-collect'
+
+      # 10. User hook: after_restore
+      - template: steps/hooks.yml
+        parameters:
+          hook: ${{ parameters.after_restore }}
+          serviceConnection: ${{ parameters.serviceConnection }}
+          hookName: 'after_restore'

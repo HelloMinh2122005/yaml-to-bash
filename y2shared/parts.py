@@ -7,13 +7,15 @@ import datetime
 import json
 import os
 import re
-import secrets
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
+from y2shared.asciiguard import fold_ascii, record, vm_report
 from y2shared.config import Job
 from y2shared.inputcsv import VMRow
 from y2shared.vmlog import VMLogger
+
+_PATH_TO_VM: dict[Path, str] = {}
 
 
 def get_parts_dir(output_csv: Path) -> Path:
@@ -25,7 +27,7 @@ def get_parts_dir(output_csv: Path) -> Path:
 def generate_run_id() -> str:
     """Generate a run ID: <UTC yyyymmddThhmmssZ>-<8 hex>."""
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    return f"{now_utc.strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(4)}"
+    return f"{now_utc.strftime('%Y%m%dT%H%M%SZ')}-{os.urandom(4).hex()}"
 
 
 def get_run_info(parts_dir: Path) -> dict[str, Any]:
@@ -104,7 +106,10 @@ def get_part_paths(parts_dir: Path, row: VMRow, total_rows: int) -> tuple[Path, 
     """Return (csv_part_path, log_part_path) for a VM."""
     width = max(4, len(str(total_rows)))
     prefix = row.part_prefix(width=width)
-    return parts_dir / f"{prefix}.csv", parts_dir / f"{prefix}.log"
+    csv_p, log_p = parts_dir / f"{prefix}.csv", parts_dir / f"{prefix}.log"
+    _PATH_TO_VM[csv_p.resolve()] = row.vm_name
+    _PATH_TO_VM[log_p.resolve()] = row.vm_name
+    return csv_p, log_p
 
 
 def is_part_finished(parts_dir: Path, row: VMRow, total_rows: int) -> bool:
@@ -133,6 +138,7 @@ def write_part_files(
     total_rows: int,
     row_values: list[str],
     logger: VMLogger,
+    columns: Sequence[str] | None = None,
 ) -> None:
     """
     Atomically write the VM's .log and .csv part files.
@@ -140,8 +146,28 @@ def write_part_files(
     always has its corresponding .log.
     """
     csv_final, log_final = get_part_paths(parts_dir, row, total_rows)
+    _PATH_TO_VM[csv_final.resolve()] = row.vm_name
+    _PATH_TO_VM[log_final.resolve()] = row.vm_name
+
     csv_tmp = csv_final.with_suffix(".csv.tmp")
     log_tmp = log_final.with_suffix(".log.tmp")
+
+    # Fold CSV values and record replacements
+    folded_row_values: list[str] = []
+    for i, val in enumerate(row_values):
+        col_name = columns[i] if columns and i < len(columns) else None
+        folded_val, n = fold_ascii(val)
+        if n > 0 and col_name:
+            if str(val).startswith("ERROR:az:"):
+                record(row.vm_name, "az", n)
+            else:
+                record(row.vm_name, col_name, n)
+        folded_row_values.append(folded_val)
+
+    # In case any new report lines were recorded:
+    for rpt in vm_report(row.vm_name):
+        if rpt not in logger.lines:
+            logger._append(rpt)
 
     # 1. Write log atomically
     logger.write_to_file(log_tmp)
@@ -154,7 +180,7 @@ def write_part_files(
     # 2. Write CSV row atomically
     with open(csv_tmp, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
-        writer.writerow(row_values)
+        writer.writerow(folded_row_values)
         f.flush()
         os.fsync(f.fileno())
     os.replace(csv_tmp, csv_final)
@@ -222,9 +248,47 @@ def append_part_log(log_path: Path, lines: list[str]) -> None:
     """Atomically append lines to VM part log file."""
     if not lines:
         return
+    vm_name = _PATH_TO_VM.get(log_path.resolve())
+    if not vm_name:
+        m_file = re.search(r"^\d+-(.+)$", log_path.stem)
+        if m_file:
+            vm_name = m_file.group(1)
+
+    folded_lines: list[str] = []
+    report_lines: list[str] = []
+    cur_hook = "unknown"
+    for line in lines:
+        m = re.search(r"\[post_run:([^\]]+)\]", line)
+        if m:
+            cur_hook = m.group(1)
+        folded, n = fold_ascii(line)
+        folded_lines.append(folded)
+        if n > 0 and vm_name:
+            if m:
+                source = f"post_run:{m.group(1)}"
+            elif "[az]" in line or "az " in line.lower():
+                source = "az"
+            else:
+                source = f"post_run:{cur_hook}"
+            record(vm_name, source, n)
+            for rpt in vm_report(vm_name):
+                if rpt not in report_lines:
+                    report_lines.append(rpt)
+
+    existing_text = ""
+    if log_path.exists():
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                existing_text = f.read()
+        except Exception:
+            pass
+
     with open(log_path, "a", encoding="utf-8") as f:
-        for line in lines:
+        for line in folded_lines:
             f.write(line if line.endswith("\n") else line + "\n")
+        for rpt in report_lines:
+            if rpt not in existing_text and rpt not in folded_lines:
+                f.write(rpt if rpt.endswith("\n") else rpt + "\n")
         f.flush()
         os.fsync(f.fileno())
 

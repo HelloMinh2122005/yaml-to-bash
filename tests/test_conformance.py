@@ -316,3 +316,31 @@ sys.exit(c.main(prof, sys.argv[2:]))
         env=cmd_env,
         cwd=str(cwd),
     )
+
+
+def test_conformance_resume_after_still_running(tmp_path: Path):
+    """Regression test for Owner Addition (b): a successful --resume after ERROR:still_running reports 1/1 matched."""
+    fleet = make_fleet(
+        tmp_path,
+        n=1,
+        os_type="linux",
+        sleep_before_collect=0.05,
+        collect_retry_interval=0.05,
+        collect_retries=1,
+    )
+    vm_name = fleet["vm_names"][0]
+    job_yaml = fleet["job_yaml"]
+    state_dir = tmp_path / "fake_az_state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    env1 = {"FAKE_AZ_STATE_DIR": str(state_dir), f"FAKE_AZ_BUSY_COUNT_{vm_name}": "5"}
+
+    res1 = run_cli("y2b", ["run", str(job_yaml), "--phase", "all", "-y"], cwd=tmp_path, env=env1)
+    assert res1.returncode == 2
+
+    env2 = {"FAKE_AZ_STATE_DIR": str(state_dir)}
+    res2 = run_cli("y2b", ["run", str(job_yaml), "--resume", "-y"], cwd=tmp_path, env=env2)
+    assert res2.returncode == 0
+    assert "conformance: 1/1 VMs matched plan" in res2.stdout
+    assert "unexpected reader" not in res2.stdout
+    assert "unexpected reader" not in res2.stderr
+

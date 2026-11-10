@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from y2shared.asciiguard import scan_non_ascii
 from y2shared.config import Job
 from y2shared.validate import ValidationIssue, ValidationResult
 
@@ -84,6 +85,12 @@ def read_input_csv(
 
     if not path.is_file():
         errors.append(ValidationIssue(path=str(path), message=f"Input CSV file not found: {path}"))
+        return [], [], ValidationResult(errors, warnings)
+
+    csv_scan_issues = scan_non_ascii(path)
+    if csv_scan_issues:
+        for issue_str in csv_scan_issues:
+            errors.append(ValidationIssue(path="", message=issue_str))
         return [], [], ValidationResult(errors, warnings)
 
     try:

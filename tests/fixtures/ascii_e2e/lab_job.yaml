@@ -1,0 +1,34 @@
+# ==============================================================================
+# Dedicated ASCII E2E Lab Job targeting lin01 only (T-06 / TP-15 / TP-18)
+# All file contents are strictly ASCII (AC-4 / TP-09).
+# ==============================================================================
+input: "./list_vm.csv"
+output_log: "./result.log"
+output_csv: "./result.csv"
+parallel: 1
+
+sleep_before_collect: "10s"
+collect_retry_interval: "5s"
+collect_retries: 3
+
+invoke:
+  runcommand:
+    res_file: "/var/tmp/runcommand/result.res"
+    log_file: "/var/tmp/runcommand/result.log"
+    steps:
+      - name: "write-vietnamese"
+        timeout: 30
+        script: |
+          # Write Vietnamese text using hex escapes so script file is 100% ASCII
+          VAL=$(printf 'Nguy\xe1\xbb\x85n \xc4\x90\xc3\xa0 N\xe1\xba\xb5ng')
+          write_result VIETNAMESE_TEXT "$VAL"
+
+collect:
+  - column: "vm_name"
+    source: "input.vm_name"
+
+  - column: "resource_group"
+    source: "input.resource_group"
+
+  - column: "vietnamese_val"
+    var: "VIETNAMESE_TEXT"

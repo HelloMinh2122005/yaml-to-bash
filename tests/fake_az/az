@@ -542,6 +542,16 @@ if "run-command" in args and "invoke" in args:
 
     b64_linux_kver = base64.b64encode(b"5.14.0-362.el9.x86_64").decode("ascii")
     b64_hw_pass = base64.b64encode(b"PASS").decode("ascii")
+
+    # Vietnamese scenario for T-06 / TP-15
+    b64_vietnamese = ""
+    rest_script_file = os.path.join(state_dir, f"{vm_name}_rest_script") if vm_name else ""
+    has_vn_script = rest_script_file and os.path.exists(rest_script_file) and "VIETNAMESE_TEXT" in open(rest_script_file, encoding="utf-8").read()
+    if os.environ.get("FAKE_AZ_VIETNAMESE") or (vm_name and os.environ.get(f"FAKE_AZ_VIETNAMESE_{vm_name}")) or has_vn_script:
+        vn_val = os.environ.get(f"FAKE_AZ_VIETNAMESE_{vm_name}", os.environ.get("FAKE_AZ_VIETNAMESE", "Nguyễn Đà Nẵng"))
+        b64_val = base64.b64encode(vn_val.encode("utf-8")).decode("ascii")
+        b64_vietnamese = f"VIETNAMESE_TEXT={b64_val}\n"
+
     payload = {
         "value": [
             {
@@ -559,6 +569,7 @@ if "run-command" in args and "invoke" in args:
                     f"KERNEL_VERSION={b64_linux_kver}\n"
                     "KERNEL_COUNT=Mw==\n"
                     f"HW_AUDIT_STATUS={b64_hw_pass}\n"
+                    f"{b64_vietnamese}"
                     f"__Y2B_DONE__={b64_run}\n"
                     "===END_RESULT_RES===\n"
                     "[stderr]\n"

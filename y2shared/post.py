@@ -258,7 +258,7 @@ def run_post_phase(
             result.powered_off += v_powered_off
             result.power_failed += v_power_failed
             completed += 1
-            sys.stderr.write(f"\r[Phase 3: Post] [ {completed}/{total_work} ] deallocated {result.deallocated} · powered_off {result.powered_off}   ")
+            sys.stderr.write(f"\r[Phase 3: Post] [ {completed}/{total_work} ] deallocated {result.deallocated} | powered_off {result.powered_off}   ")
             sys.stderr.flush()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as executor:

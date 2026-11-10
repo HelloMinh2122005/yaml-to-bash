@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import ntpath
+from pathlib import Path, PureWindowsPath
 import re
-from pathlib import Path
 from typing import Any
 
+from y2shared.asciiguard import scan_non_ascii
 from y2shared.config import Job
 from y2shared.profile import Profile, Reporter
 from y2shared.validate import (
@@ -22,7 +22,7 @@ def _is_windows_absolute(path: str) -> bool:
         return False
     if not re.match(r"^[a-zA-Z]:[\\/]", path):
         return False
-    return ntpath.isabs(path)
+    return PureWindowsPath(path).is_absolute()
 
 
 def _has_control_chars(path: str) -> bool:

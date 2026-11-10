@@ -1,0 +1,47 @@
+# patch-collect.yml - Example manual patch collection pipeline extending patch-collect template
+# Part of ADO-native patch template package (R1).
+# Pure ASCII, LF line endings, BOM-less UTF-8.
+
+trigger: none
+
+# ==============================================================================
+# Separate Templates Repository Setup:
+# When patch templates reside in a central or separate repository rather than
+# 'self', declare the repository resource and pass `templatesRepo`:
+#
+# resources:
+#   repositories:
+#     - repository: patch_templates
+#       type: git
+#       name: Infrastructure/ado-patch-templates
+#       ref: refs/heads/main
+#
+# extends:
+#   template: ado/templates/patch-collect.yml@patch_templates
+#   parameters:
+#     templatesRepo: 'patch_templates'
+#     serviceConnection: 'sc-azure-lab'
+#     ...
+# ==============================================================================
+
+extends:
+  template: ../templates/patch-collect.yml
+  parameters:
+    serviceConnection: 'sc-azure-lab'
+    targetsKql: 'Resources | where type =~ "microsoft.compute/virtualmachines" and tags["Environment"] == "Lab"'
+    osType: 'linux'
+    payloadPath: 'ado/examples/payloads/sample-linux.sh'
+    maxJobs: 20
+    pollSeconds: 15
+    before_start: []
+    after_run: []
+    after_restore:
+      - task: PowerShell@2
+        displayName: 'Inspect report directory'
+        inputs:
+          targetType: 'inline'
+          script: |
+            Write-Host "Y2_REPORT_DIR is: $env:Y2_REPORT_DIR"
+            if (Test-Path "$env:Y2_REPORT_DIR/status.csv") {
+                Get-Content "$env:Y2_REPORT_DIR/status.csv" | Select-Object -First 10
+            }

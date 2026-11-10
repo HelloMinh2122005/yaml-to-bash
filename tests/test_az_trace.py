@@ -587,7 +587,7 @@ def test_ado_groups_tf_build_all_invoke_collect(tmp_path: Path):
     assert res_all.returncode in (0, 2)
 
     # Check balanced groups
-    group_open = re.findall(r"^##\[group\](\S+) · (\S+)", res_all.stdout, re.MULTILINE)
+    group_open = re.findall(r"^##\[group\](\S+) \| (\S+)", res_all.stdout, re.MULTILINE)
     group_close = re.findall(r"^##\[endgroup\]", res_all.stdout, re.MULTILINE)
     assert len(group_open) == 2
     assert len(group_close) == 2
@@ -706,4 +706,21 @@ def test_console_unchanged_without_tf_build(tmp_path: Path):
         assert "Run phase:              invoke" in res_inv.stdout
     finally:
         cleanup_linux()
+
+
+def test_ado_log_label_outcome_ok_not_no_result(tmp_path: Path):
+    """Regression test for Owner Addition (a): with TF_BUILD=True, a run with OK=3 prints ##[group]lin01 | OK."""
+    fleet = make_fleet(tmp_path, n=3, os_type="linux")
+    state_dir = tmp_path / "fake_az_state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    env_tf = {"FAKE_AZ_STATE_DIR": str(state_dir), "TF_BUILD": "True"}
+
+    res = run_cli("y2b", ["run", str(fleet["job_yaml"]), "--phase", "all", "-y"], cwd=tmp_path, env=env_tf)
+    assert res.returncode == 0
+    assert "OK:          3" in res.stdout
+    assert "##[group]lin01 | OK" in res.stdout
+    assert "##[group]lin02 | OK" in res.stdout
+    assert "##[group]lin03 | OK" in res.stdout
+    assert "no_result" not in res.stdout
+
 

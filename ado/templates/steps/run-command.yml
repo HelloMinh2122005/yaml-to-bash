@@ -1,0 +1,37 @@
+# run-command.yml - Execute payload script on target VMs via Run Command
+# Part of ADO-native patch template package (R1).
+# Pure ASCII, LF line endings, BOM-less UTF-8.
+
+parameters:
+  - name: serviceConnection
+    type: string
+  - name: osType
+    type: string
+  - name: maxJobs
+    type: number
+    default: 20
+  - name: pollSeconds
+    type: number
+    default: 15
+
+steps:
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $payload = '$(Y2_PAYLOAD)'
+      if (-not (Test-Path -LiteralPath $payload)) {
+          Write-Error "Payload file does not exist: $payload"
+          exit 1
+      }
+    displayName: 'Validate payload file exists'
+
+  - task: AzurePowerShell@5
+    displayName: 'Execute run command payload'
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      ScriptType: 'FilePath'
+      ScriptPath: '$(Y2_SCRIPTS_DIR)/run-command.ps1'
+      ScriptArguments: -OsType '${{ parameters.osType }}' -PayloadFile '$(Y2_PAYLOAD)' -WorkDir '$(Y2_WORK_DIR)' -ReportDir '$(Y2_REPORT_DIR)' -MaxJobs ${{ parameters.maxJobs }} -PollSeconds ${{ parameters.pollSeconds }}
+      azurePowerShellVersion: 'LatestVersion'
+      pwsh: false
+      errorActionPreference: 'stop'
+      FailOnStandardError: false

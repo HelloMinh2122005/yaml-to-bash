@@ -1,0 +1,24 @@
+# power-restore.yml - Restore started target VMs to verified pre-run power state
+# Part of ADO-native patch template package (R1).
+# Pure ASCII, LF line endings, BOM-less UTF-8.
+
+parameters:
+  - name: serviceConnection
+    type: string
+  - name: pollSeconds
+    type: number
+    default: 15
+
+steps:
+  - task: AzurePowerShell@5
+    displayName: 'Restore VM power state'
+    condition: always()
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      ScriptType: 'FilePath'
+      ScriptPath: '$(Y2_SCRIPTS_DIR)/power-restore.ps1'
+      ScriptArguments: -WorkDir '$(Y2_WORK_DIR)' -PollSeconds ${{ parameters.pollSeconds }}
+      azurePowerShellVersion: 'LatestVersion'
+      pwsh: false
+      errorActionPreference: 'stop'
+      FailOnStandardError: false

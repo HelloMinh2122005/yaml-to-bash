@@ -10,10 +10,10 @@ yaml_to_bash Run Plan (v2 Fire-and-Forget)
   Collect retries:        3
   Output CSV:             <DIR>/result.csv
   Output Log:             <DIR>/result.log
-  Power policy:           pre_run uses action 'stop' — after the job, deallocates up to 3 VMs, INCLUDING VMs that are running now
+  Power policy:           pre_run uses action 'stop' - after the job, deallocates up to 3 VMs, INCLUDING VMs that are running now
 ==================================================
 
-Power policy: pre_run uses action 'stop' — after the job, deallocates up to 3 VMs, INCLUDING VMs that are running now
+Power policy: pre_run uses action 'stop' - after the job, deallocates up to 3 VMs, INCLUDING VMs that are running now
 
 Merging VM part files...
 
@@ -24,7 +24,7 @@ Run Completed
   Skipped:     0
   Ended:       0
   Error:       0
-  Post hooks:  ok 3 · failed 0
+  Post hooks:  ok 3 | failed 0
   Deallocated: 3
   Powered off: 0
   Output CSV:  <DIR>/result.csv

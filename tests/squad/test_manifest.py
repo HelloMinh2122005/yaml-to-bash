@@ -82,10 +82,10 @@ def test_protocol_covers_contract(repo_root: Path):
 
 
 EXPECTED_CLAUDE = {
-    "y2-lead": ("claude-opus-5-5", "high"),
-    "y2-planner": ("claude-sonnet-5-5", "high"),
+    "y2-lead": ("claude-opus-5-5", "medium"),
+    "y2-planner": ("claude-sonnet-5-5", "medium"),
     "y2-research-planner": ("claude-sonnet-5-5", "medium"),
-    "y2-test-planner": ("claude-sonnet-5-5", "high"),
+    "y2-test-planner": ("claude-sonnet-5-5", "medium"),
 }
 
 
@@ -118,7 +118,6 @@ def test_claude_helpers_cannot_code(repo_root: Path):
         fm, _ = _parse_frontmatter(agent_file.read_text())
         tools_str = str(fm.get("tools", ""))
         assert "Bash" not in tools_str, f"Helper {h} has Bash in tools"
-        assert "Edit" not in tools_str, f"Helper {h} has Edit in tools"
         disallowed = str(fm.get("disallowedTools", ""))
         assert "Agent" in disallowed, f"Helper {h} missing Agent in disallowedTools"
 

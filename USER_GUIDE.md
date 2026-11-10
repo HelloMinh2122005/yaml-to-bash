@@ -37,6 +37,7 @@ This guide is a complete, step-by-step reference for operators, systems engineer
    - [Conformance Tracking & Azure DevOps Log Groups](#conformance-tracking--azure-devops-log-groups)
    - [Outcome Markers Reference](#outcome-markers-reference)
    - [CLI Exit Codes](#cli-exit-codes)
+   - [ASCII-Only Reports & LF Line Endings](#ascii-only-reports--lf-line-endings)
 9. [Operational Best Practices & Troubleshooting](#9-operational-best-practices--troubleshooting)
    - [Handling 4 KB Output Limits](#handling-4-kb-output-limits)
    - [Handling ARM Throttling & Concurrency](#handling-arm-throttling--concurrency)
@@ -758,7 +759,7 @@ Every `az` command invoked by the engine or host scripts (`pre_run`, computed co
 ### Conformance Tracking & Azure DevOps Log Groups
 
 - At the conclusion of a run, the engine reports: `conformance: m/n VMs matched plan`. If any VM executes extra or missing Azure CLI calls compared to the precomputed plan, deviations are reported to stderr and `result.log`.
-- When executed in an Azure DevOps environment (`TF_BUILD=True` or `TF_BUILD=1`), console output organizes per-VM lines into collapsible blocks using `##[group]<vm_name> · <outcome>` and `##[endgroup]`. Embedded `##vso[` markers from guest outputs are neutralised to prevent log manipulation. Any conformance mismatch triggers `##vso[task.logissue type=warning]`.
+- When executed in an Azure DevOps environment (`TF_BUILD=True` or `TF_BUILD=1`), console output organizes per-VM lines into collapsible blocks using `##[group]<vm_name> | <outcome>` and `##[endgroup]`. Embedded `##vso[` markers from guest outputs are neutralised to prevent log manipulation. Any conformance mismatch triggers `##vso[task.logissue type=warning]`.
 
 ### Outcome Markers Reference
 
@@ -780,6 +781,7 @@ When a VM does not finish with `OK`, non-passthrough columns carry an outcome ma
 | `ERROR:auth` | Authentication expired or unauthorized | Run `az login` and retry with `--resume` |
 | `ERROR:run_command_timeout` | Command exceeded `run_timeout` | Check for hung commands |
 | `ERROR:result_truncated` | VM stdout exceeded 4,096 bytes buffer | Redirect diagnostic stdout to `$LOG_FILE`, keep `write_result` values concise |
+| `ERROR:no_result_block` | No result delimiters (`===BEGIN_RESULT_RES===` / `===END_RESULT_RES===`) found in output | Check guest script execution and ensure result block delimiters are emitted |
 | `ERROR:no_result` | Worker process died before completing row | Resume run with `--resume` |
 
 ### CLI Exit Codes
@@ -790,6 +792,24 @@ When a VM does not finish with `OK`, non-passthrough columns carry an outcome ma
 | `1` | Configuration Error | YAML syntax error, schema violation, input CSV validation failure, or `export-ado --check` drift detected. |
 | `2` | Non-OK Outcomes / Failures / Held VMs | Run finished, but one or more VMs had `SKIPPED`, `ENDED`, or `ERROR` outcomes, or a post hook / power action failed, or VMs were left still running remotely. Mapped to `SucceededWithIssues` in ADO pipelines. |
 | `3` | Fatal / Aborted | Run interrupted by user (SIGINT / Ctrl-C), Auth Circuit Breaker tripped (5 consecutive auth failures), or CSV merge error. In `--phase invoke`, the last stdout line is still `fired=<n>`; the saved state enables the aborted-invoke restore path via `--phase collect` to safely deallocate started VMs. |
+
+### ASCII-Only Reports & LF Line Endings
+
+To guarantee deterministic parsing across heterogeneous runner platforms, automated CI/CD environments, and spreadsheet tools (such as Excel on Windows reading UTF-8 CSVs as ANSI), the engine strictly enforces ASCII reporting and LF line endings:
+
+- **LF-Only Repository Policy**: A root `.gitattributes` rule (`* text=auto eol=lf`) ensures all tracked text files checkout and maintain LF line terminators across Linux, macOS, and Windows.
+- **Static Validation Scan**: When `validate`, `compile`, or `run` starts, input files (`job.yaml` including comments, the input inventory CSV, and all resolved `script_path` files) are scanned as UTF-8 bytes. Any non-ASCII character (codepoint > 127) immediately causes the command to fail with exit code `1`, reporting `path:line:col: non-ASCII character U+XXXX` (capped at 20 offending lines per file plus a count line `path: N more non-ASCII characters`). Undecodable bytes report `path: invalid UTF-8 at byte N`, and UTF-8 BOM is rejected as `path:1:1: non-ASCII character U+FEFF`.
+- **Runtime Folding**: Dynamic runtime values (such as remote `write_result` outputs, computed column outputs, precheck and post-run stdout/stderr, and Azure CLI errors) are sanitized before reaching any sink (`result.csv`, `result.log`, temporary part files, console). Vietnamese and accented Latin letters fold to base ASCII (e.g. `Nguyễn` -> `Nguyen`, `Đà Nẵng` -> `Da Nang`), while other non-ASCII characters (emoji, CJK, etc.) fold to `?`. Folding never raises exceptions. Raw unmutated output is preserved on the guest VM inside `$LOG_FILE`.
+- **Sanitization Reporting**:
+  - Each VM log section records `[ascii] <source>: N non-ASCII char(s) replaced` once per sanitized source (`<column_name>`, `precheck:<name>`, `post_run:<name>`, or `az`).
+  - If any value was sanitized during a run, the summary prints:
+    ```
+    ascii: N value(s) sanitized on M VM(s)
+    ```
+  - Under Azure DevOps (`TF_BUILD=True` or `TF_BUILD=1`), a pipeline warning issue is also emitted:
+    ```
+    ##vso[task.logissue type=warning]ascii: N value(s) sanitized on M VM(s)
+    ```
 
 ---
 

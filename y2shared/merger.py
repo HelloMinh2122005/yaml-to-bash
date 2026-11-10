@@ -10,6 +10,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from y2shared.asciiguard import fold_ascii
 from y2shared.config import Job
 from y2shared.inputcsv import VMRow
 from y2shared.parts import get_part_paths, is_part_finished, read_part_row
@@ -31,7 +32,7 @@ def merge_parts(
     Returns outcome counts dictionary: {"OK": n, "SKIPPED": n, "ENDED": n, "ERROR": n, ...}
     """
     total_rows = len(all_rows)
-    headers = [col.column for col in job.collect]
+    headers = [fold_ascii(col.column)[0] for col in job.collect]
 
     csv_final = job.output_csv.resolve()
     log_final = job.output_log.resolve()
@@ -70,7 +71,7 @@ def merge_parts(
                         else:
                             data_row.append("ERROR:no_result")
 
-                writer.writerow(data_row)
+                writer.writerow([fold_ascii(c)[0] for c in data_row])
 
                 # Classify outcome based on columns
                 # If any column starts with ERROR: -> ERROR
@@ -95,22 +96,24 @@ def merge_parts(
             now_str = datetime.datetime.now().astimezone().isoformat()
             f_log.write(f"######################################################################\n")
             f_log.write(f"# yaml_to_bash Execution Log\n")
-            f_log.write(f"# Job: {job.yaml_path.name} (SHA256: {job.job_hash})\n")
+            f_log.write(f"# Job: {fold_ascii(job.yaml_path.name)[0]} (SHA256: {job.job_hash})\n")
             f_log.write(f"# Merged: {now_str}\n")
             f_log.write(f"# Total VMs: {total_rows} (OK={outcome_counts['OK']}, SKIPPED={outcome_counts['SKIPPED']}, ENDED={outcome_counts['ENDED']}, ERROR={outcome_counts['ERROR']})\n")
             f_log.write(f"######################################################################\n\n")
 
             for row in all_rows:
                 _, log_part = get_part_paths(parts_dir, row, total_rows)
+                safe_vm = fold_ascii(row.vm_name)[0]
                 if log_part.is_file() and log_part.stat().st_size > 0:
                     try:
                         with open(log_part, "r", encoding="utf-8", errors="replace") as lf:
-                            f_log.write(lf.read())
+                            content = lf.read()
+                            f_log.write(fold_ascii(content)[0])
                             f_log.write("\n")
                     except Exception as e:
-                        f_log.write(f"=== Error reading log for {row.vm_name} (row {row.index}): {e} ===\n\n")
+                        f_log.write(f"=== Error reading log for {safe_vm} (row {row.index}): {fold_ascii(e)[0]} ===\n\n")
                 else:
-                    f_log.write(f"=== No log recorded for {row.vm_name} (row {row.index}) ===\n\n")
+                    f_log.write(f"=== No log recorded for {safe_vm} (row {row.index}) ===\n\n")
 
             f_log.write(f"######################################################################\n")
             f_log.write(f"# End of Run Log\n")

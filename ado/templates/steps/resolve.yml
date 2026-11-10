@@ -1,0 +1,24 @@
+# resolve.yml - Resolve target VMs via Azure Resource Graph
+# Part of ADO-native patch template package (R1).
+# Pure ASCII, LF line endings, BOM-less UTF-8.
+
+parameters:
+  - name: serviceConnection
+    type: string
+  - name: targetsKql
+    type: string
+  - name: osType
+    type: string
+
+steps:
+  - task: AzurePowerShell@5
+    displayName: 'Resolve target VMs'
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      ScriptType: 'FilePath'
+      ScriptPath: '$(Y2_SCRIPTS_DIR)/resolve.ps1'
+      ScriptArguments: -TargetsKql '${{ parameters.targetsKql }}' -OsType '${{ parameters.osType }}' -WorkDir '$(Y2_WORK_DIR)' -ReportDir '$(Y2_REPORT_DIR)' -RunId '$(Y2_RUN_ID)'
+      azurePowerShellVersion: 'LatestVersion'
+      pwsh: false
+      errorActionPreference: 'stop'
+      FailOnStandardError: false
