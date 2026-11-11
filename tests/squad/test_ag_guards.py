@@ -1,3 +1,9 @@
+"""Guard hook tests for the private `.agents/` plugin workspace.
+
+The workspace is not shipped in this repository, so the module skips itself
+when it is absent.
+"""
+
 from __future__ import annotations
 
 import json
@@ -6,6 +12,14 @@ import subprocess
 import sys
 from pathlib import Path
 import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_GUARD_SCRIPTS = _REPO_ROOT / ".agents" / "plugins" / "y2" / "scripts"
+if not (_GUARD_SCRIPTS / "protect_handoff.py").is_file():
+    pytest.skip(
+        f"private agent workspace not present: {_GUARD_SCRIPTS / 'protect_handoff.py'}",
+        allow_module_level=True,
+    )
 
 
 def _run_hook(script_path: Path, payload: dict | str, repo_root: Path) -> dict:

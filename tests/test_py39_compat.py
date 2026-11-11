@@ -20,7 +20,7 @@ ALLOWED_STDLIB = {
     "concurrent", "contextlib", "copy", "csv", "dataclasses", "datetime",
     "enum", "fcntl", "fnmatch", "functools", "glob", "hashlib", "heapq",
     "importlib", "inspect", "io", "itertools", "json", "logging", "math",
-    "os", "pathlib", "queue", "random", "re", "resource", "shlex", "shutil", "signal",
+    "os", "pathlib", "posixpath", "queue", "random", "re", "resource", "shlex", "shutil", "signal",
     "socket", "stat", "string", "subprocess", "sys", "tempfile", "threading",
     "time", "traceback", "typing", "unittest", "urllib", "uuid", "warnings",
 }

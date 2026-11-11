@@ -1,3 +1,9 @@
+"""Role guard tests for the private `.claude/` workspace.
+
+The workspace is not shipped in this repository, so the module skips itself
+when it is absent.
+"""
+
 from __future__ import annotations
 
 import json
@@ -6,6 +12,14 @@ import subprocess
 import sys
 from pathlib import Path
 import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_GUARD_SCRIPT = _REPO_ROOT / ".claude" / "hooks" / "guard_y2_writes.py"
+if not _GUARD_SCRIPT.is_file():
+    pytest.skip(
+        f"private agent workspace not present: {_GUARD_SCRIPT}",
+        allow_module_level=True,
+    )
 
 
 @pytest.mark.parametrize(

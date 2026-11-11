@@ -25,6 +25,21 @@ DOC_FILES = {
     "az_devops_03.md": REPO_ROOT / "az_devops" / "03-pipeline-reference.md",
 }
 
+# az_devops/ holds design notes that are not shipped with this repository.
+# Tests that read them skip when the directory is absent.
+_ADO_DOCS = (
+    "README.md",
+    "02-two-runcommand-pattern.md",
+    "03-pipeline-reference.md",
+)
+_MISSING_ADO_DOCS = [
+    name for name in _ADO_DOCS if not (REPO_ROOT / "az_devops" / name).is_file()
+]
+requires_az_devops = pytest.mark.skipif(
+    bool(_MISSING_ADO_DOCS),
+    reason="private az_devops/ documentation not present: " f"{', '.join(_MISSING_ADO_DOCS)}",
+)
+
 
 def test_readme_and_user_guide_content():
     """Verify README.md and USER_GUIDE.md contain all required topics from AC-19."""
@@ -53,6 +68,7 @@ def test_readme_and_user_guide_content():
         assert has_short_flag_note, f"{name} missing short flags not redacted note"
 
 
+@requires_az_devops
 def test_az_devops_readme_content():
     """Verify az_devops/README.md has updated scope and references export-ado."""
     content = DOC_FILES["az_devops_README.md"].read_text(encoding="utf-8")
@@ -61,6 +77,7 @@ def test_az_devops_readme_content():
     assert "pipelines/generated" in content
 
 
+@requires_az_devops
 def test_az_devops_02_pattern_content():
     """Verify az_devops/02-two-runcommand-pattern.md describes Phase 3 and power restore path."""
     content = DOC_FILES["az_devops_02.md"].read_text(encoding="utf-8")
@@ -69,6 +86,7 @@ def test_az_devops_02_pattern_content():
     assert "aborted-invoke restore path" in content.lower() or "aborted-invoke" in content.lower()
 
 
+@requires_az_devops
 def test_az_devops_03_reference_content():
     """Verify az_devops/03-pipeline-reference.md references export-ado and pipelines/generated."""
     content = DOC_FILES["az_devops_03.md"].read_text(encoding="utf-8")
@@ -76,6 +94,7 @@ def test_az_devops_03_reference_content():
     assert "pipelines/generated" in content
 
 
+@requires_az_devops
 def test_docs_markdown_links_resolve():
     """Verify every relative markdown link in the 5 documents resolves to an existing file."""
     link_re = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
@@ -98,6 +117,7 @@ def test_docs_markdown_links_resolve():
             assert resolved.exists(), f"Broken relative link in {name}: '{target}' -> {resolved}"
 
 
+@requires_az_devops
 def test_fenced_commands_parse_with_cli():
     """Verify every fenced command starting with y2b or y2p parses with argparse."""
     parser_b = build_parser(B_PROFILE)

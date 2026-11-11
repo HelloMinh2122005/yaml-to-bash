@@ -1,8 +1,27 @@
+"""Manifest tests for the private `.claude/`, `.agents/`, and `.handoffs/` trees.
+
+Those trees are not shipped in this repository, so the module skips itself
+when any of them is absent.
+"""
+
 from __future__ import annotations
 
 import re
 from pathlib import Path
 import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REQUIRED_ASSETS = (
+    _REPO_ROOT / ".handoffs" / "PROTOCOL.md",
+    _REPO_ROOT / ".claude" / "agents",
+    _REPO_ROOT / ".agents" / "plugins" / "y2" / "agents",
+)
+_MISSING_ASSETS = [str(path) for path in _REQUIRED_ASSETS if not path.exists()]
+if _MISSING_ASSETS:
+    pytest.skip(
+        "private agent workspace not present: " + ", ".join(_MISSING_ASSETS),
+        allow_module_level=True,
+    )
 
 
 def test_protocol_covers_contract(repo_root: Path):
