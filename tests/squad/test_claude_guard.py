@@ -13,13 +13,9 @@ import sys
 from pathlib import Path
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_GUARD_SCRIPT = _REPO_ROOT / ".claude" / "hooks" / "guard_y2_writes.py"
-if not _GUARD_SCRIPT.is_file():
-    pytest.skip(
-        f"private agent workspace not present: {_GUARD_SCRIPT}",
-        allow_module_level=True,
-    )
+from tests.squad.helpers import skip_if_missing_assets
+
+skip_if_missing_assets(".claude/hooks/guard_y2_writes.py")
 
 
 @pytest.mark.parametrize(

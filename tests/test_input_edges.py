@@ -13,12 +13,13 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.helpers_edges import make_vm_row
 from y2b.compiler import WRITE_RESULT_PATTERN
 from y2b.validate import validate_job_dict as validate_bash_job
 from y2p.validate import validate_job_dict as validate_ps_job
 from y2shared.collectlist import CollectList
 from y2shared.config import load_job, parse_duration
-from y2shared.inputcsv import VMRow, read_input_csv, select_target_rows
+from y2shared.inputcsv import read_input_csv, select_target_rows
 from y2shared.scan import scan_written_vars
 
 CSV_HEADER = "vm_name,resource_group,subscription,os\n"
@@ -26,7 +27,7 @@ CSV_ROW = "vm-1,rg-1,Sub One,linux\n"
 CSV_ROW_2 = "vm-2,rg-2,Sub One,linux\n"
 
 
-def job_dict(tool: str = "y2b") -> dict:
+def job_dict(tool: str = "y2b") -> dict[str, object]:
     """Return a minimal job mapping that satisfies the shared schema."""
     if tool == "y2b":
         res_file = "/var/tmp/y2/result.res"
@@ -54,20 +55,9 @@ def job_dict(tool: str = "y2b") -> dict:
 
 
 def write_csv(path: Path, content: str) -> Path:
+    """Write CSV text content to path and return the path."""
     path.write_text(content, encoding="utf-8")
     return path
-
-
-def make_row(index: int, vm_name: str = "vm-1") -> VMRow:
-    return VMRow(
-        index=index,
-        vm_name=vm_name,
-        resource_group="rg-1",
-        subscription="Sub One",
-        os="linux",
-        raw_data={"vm_name": vm_name},
-        env={"VM_NAME": vm_name},
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -266,20 +256,20 @@ def test_select_target_rows_positive_limit_truncates_in_order(tmp_path):
 @pytest.mark.bug
 def test_select_target_rows_zero_limit_selects_nothing():
     """BVA: --limit 0 requests zero VMs, not the whole fleet."""
-    rows = [make_row(1, "vm-1"), make_row(2, "vm-2")]
+    rows = [make_vm_row(1, "vm-1"), make_vm_row(2, "vm-2")]
     assert select_target_rows(rows, limit=0) == []
 
 
 @pytest.mark.bug
 def test_select_target_rows_negative_limit_selects_nothing():
     """BVA: a negative --limit is invalid input and must not select the whole fleet."""
-    rows = [make_row(1, "vm-1"), make_row(2, "vm-2")]
+    rows = [make_vm_row(1, "vm-1"), make_vm_row(2, "vm-2")]
     assert select_target_rows(rows, limit=-1) == []
 
 
 def test_select_target_rows_vm_filter_exact_match():
     """EP: --vm matches VM names exactly."""
-    rows = [make_row(1, "vm-1"), make_row(2, "vm-2")]
+    rows = [make_vm_row(1, "vm-1"), make_vm_row(2, "vm-2")]
     assert [r.vm_name for r in select_target_rows(rows, vm_names=["vm-2"])] == ["vm-2"]
 
 
@@ -342,7 +332,7 @@ def test_collect_list_subset_load_ignores_records_outside_targets(tmp_path):
     cl = CollectList(tmp_path)
     cl.append({"index": 1, "vm_name": "vm-1"})
     cl.append({"index": 2, "vm_name": "vm-2"})
-    assert list(cl.load([make_row(2, "vm-2")])) == [2]
+    assert list(cl.load([make_vm_row(2, "vm-2")])) == [2]
 
 
 # ---------------------------------------------------------------------------

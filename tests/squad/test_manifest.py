@@ -10,18 +10,13 @@ import re
 from pathlib import Path
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_REQUIRED_ASSETS = (
-    _REPO_ROOT / ".handoffs" / "PROTOCOL.md",
-    _REPO_ROOT / ".claude" / "agents",
-    _REPO_ROOT / ".agents" / "plugins" / "y2" / "agents",
+from tests.squad.helpers import skip_if_missing_assets
+
+skip_if_missing_assets(
+    ".handoffs/PROTOCOL.md",
+    ".claude/agents",
+    ".agents/plugins/y2/agents",
 )
-_MISSING_ASSETS = [str(path) for path in _REQUIRED_ASSETS if not path.exists()]
-if _MISSING_ASSETS:
-    pytest.skip(
-        "private agent workspace not present: " + ", ".join(_MISSING_ASSETS),
-        allow_module_level=True,
-    )
 
 
 def test_protocol_covers_contract(repo_root: Path):

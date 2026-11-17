@@ -7,32 +7,56 @@ reproduce a confirmed defect.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
-from y2shared import hostenv
+from tests.helpers_edges import make_vm_row
+from y2b.__main__ import main as y2b_main
+from y2b.profile import PROFILE as B_PROFILE
+from y2p.__main__ import main as y2p_main
+from y2shared import cli, hostenv, runner
 from y2shared.adolog import ProcessLogSink, is_tf_build, neutralise, print_vm_groups
 from y2shared.azcmd import argv_matches, build_run_command_post
 from y2shared.aztrace import format_engine_line, redact_argv, redact_text
 from y2shared.hostenv import check_host_bash, raise_nofile, resolve_bash
-from y2shared.inputcsv import VMRow
 from y2shared.repo import find_repo_root, rel_posix
 from y2shared.shell import run_bash
 
 GUID = "11111111-1111-1111-1111-111111111111"
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def make_row(index: int = 1, vm_name: str = "vm-1") -> VMRow:
-    return VMRow(
-        index=index,
-        vm_name=vm_name,
-        resource_group="rg-1",
-        subscription="Sub One",
-        os="linux",
-        raw_data={"vm_name": vm_name},
-        env={"VM_NAME": vm_name},
+def _write_minimal_linux_job(tmp_path: Path) -> Path:
+    """Create a minimal valid Linux job YAML and CSV inside tmp_path."""
+    csv_path = tmp_path / "list.csv"
+    csv_path.write_text("vm_name,resource_group,subscription,os\nlin01,rg-1,Sub One,linux\n", encoding="utf-8")
+    job_yaml = tmp_path / "job.yaml"
+    job_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "input": str(csv_path),
+                "output_csv": str(tmp_path / "result.csv"),
+                "output_log": str(tmp_path / "result.log"),
+                "sleep_before_collect": "1s",
+                "invoke": {
+                    "runcommand": {
+                        "res_file": "/var/tmp/result.res",
+                        "log_file": "/var/tmp/result.log",
+                        "steps": [{"name": "step-1", "script": "write_result A 1\n"}],
+                    }
+                },
+                "collect": [
+                    {"column": "vm_name", "source": "input.vm_name"},
+                    {"column": "a", "var": "A"},
+                ],
+            }
+        ),
+        encoding="utf-8",
     )
+    return job_yaml
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +108,7 @@ def test_process_log_sink_drains_per_index():
 @pytest.mark.bug
 def test_print_vm_groups_neutralises_group_header(capsys):
     """EP: a VM name carrying a newline must not inject an ADO command."""
-    row = make_row(vm_name="vm-1\n##vso[task.complete result=Failed]")
+    row = make_vm_row(vm_name="vm-1\n##vso[task.complete result=Failed]")
     sink = ProcessLogSink()
     sink.add(row.index, row.vm_name, "line")
 
@@ -245,3 +269,66 @@ def test_format_engine_line_never_contains_secret_values():
     assert "abc123" not in line
     assert "***" in line
     assert line.startswith("engine:invoke attempt=1 rc=0 status=SUCCESS")
+
+
+@pytest.mark.bug
+def test_redact_text_masks_dash_prefixed_secret_after_equals():
+    """EP: a secret value starting with '-' after '=' must still be redacted."""
+    redacted = redact_text("az login --password=-secret --verbose")
+    assert "-secret" not in redacted
+    assert "--password=***" in redacted
+
+
+# ---------------------------------------------------------------------------
+# cli.py and entrypoints
+# ---------------------------------------------------------------------------
+
+
+def test_cli_validate_valid_job_returns_zero(tmp_path, monkeypatch):
+    """branch: cli.main validate returns 0 for a valid job and inventory CSV."""
+    monkeypatch.setattr(cli, "check_host_bash", lambda: None)
+    job_yaml = _write_minimal_linux_job(tmp_path)
+    assert cli.main(B_PROFILE, ["validate", str(job_yaml)]) == 0
+
+
+def test_cli_run_rejects_phase_with_dry_run(tmp_path):
+    """branch: --phase invoke cannot be combined with --dry-run."""
+    job_yaml = _write_minimal_linux_job(tmp_path)
+    assert cli.main(B_PROFILE, ["run", str(job_yaml), "--phase", "invoke", "--dry-run", "-y"]) == 1
+
+
+@pytest.mark.parametrize("entry_main", [y2b_main, y2p_main])
+def test_entrypoint_main_forwards_validation_exit_code(tmp_path, monkeypatch, entry_main):
+    """branch: y2b and y2p module entrypoints return exit code 1 on missing job files."""
+    monkeypatch.setattr(cli, "check_host_bash", lambda: None)
+    assert entry_main(["validate", str(tmp_path / "missing.yaml")]) == 1
+
+
+def test_bin_y2b_wrapper_forwards_validation_exit_code(tmp_path):
+    """branch: bin/y2b wrapper executes y2b and returns its non-zero exit code."""
+    proc = subprocess.run(
+        [str(REPO_ROOT / "bin" / "y2b"), "validate", str(tmp_path / "missing.yaml")],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 1
+
+
+@pytest.mark.bug
+def test_cli_run_zero_parallel_returns_error_instead_of_traceback(tmp_path, monkeypatch):
+    """BVA: --parallel 0 must exit cleanly with code 1 instead of crashing ThreadPoolExecutor."""
+    monkeypatch.setattr(runner, "check_host_bash", lambda: None)
+    monkeypatch.setattr(runner, "start_caffeinate", lambda: None)
+    monkeypatch.setattr(runner, "stop_caffeinate", lambda p: None)
+    job_yaml = _write_minimal_linux_job(tmp_path)
+    rc = cli.main(B_PROFILE, ["run", str(job_yaml), "--parallel", "0", "--dry-run", "-y"])
+    assert rc == 1
+
+
+@pytest.mark.bug
+def test_cli_compile_directory_output_returns_error_instead_of_traceback(tmp_path):
+    """EP: compile -o <existing-dir> must exit cleanly with code 1 instead of IsADirectoryError."""
+    job_yaml = _write_minimal_linux_job(tmp_path)
+    rc = cli.main(B_PROFILE, ["compile", str(job_yaml), "-o", str(tmp_path)])
+    assert rc == 1

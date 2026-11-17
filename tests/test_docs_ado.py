@@ -41,6 +41,18 @@ requires_az_devops = pytest.mark.skipif(
 )
 
 
+def _available_doc_files() -> dict[str, Path]:
+    """Return shipped documentation plus any present private az_devops docs."""
+    available: dict[str, Path] = {
+        "README.md": DOC_FILES["README.md"],
+        "USER_GUIDE.md": DOC_FILES["USER_GUIDE.md"],
+    }
+    for name, path in DOC_FILES.items():
+        if name not in available and path.is_file():
+            available[name] = path
+    return available
+
+
 def test_readme_and_user_guide_content():
     """Verify README.md and USER_GUIDE.md contain all required topics from AC-19."""
     for name in ["README.md", "USER_GUIDE.md"]:
@@ -94,11 +106,10 @@ def test_az_devops_03_reference_content():
     assert "pipelines/generated" in content
 
 
-@requires_az_devops
 def test_docs_markdown_links_resolve():
-    """Verify every relative markdown link in the 5 documents resolves to an existing file."""
+    """Verify every relative markdown link in available documents resolves to an existing file."""
     link_re = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
-    for name, path in DOC_FILES.items():
+    for name, path in _available_doc_files().items():
         content = path.read_text(encoding="utf-8")
         # Remove code blocks so links inside code are not inspected
         content_no_code = re.sub(r"```.*?```", "", content, flags=re.DOTALL)
@@ -117,14 +128,13 @@ def test_docs_markdown_links_resolve():
             assert resolved.exists(), f"Broken relative link in {name}: '{target}' -> {resolved}"
 
 
-@requires_az_devops
 def test_fenced_commands_parse_with_cli():
     """Verify every fenced command starting with y2b or y2p parses with argparse."""
     parser_b = build_parser(B_PROFILE)
     parser_p = build_parser(P_PROFILE)
 
     # Collect fenced code blocks
-    for name, path in DOC_FILES.items():
+    for name, path in _available_doc_files().items():
         content = path.read_text(encoding="utf-8")
         blocks = re.findall(r"```(?:bash|sh)?\n(.*?)```", content, re.DOTALL)
         for block in blocks:
